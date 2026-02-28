@@ -1,10 +1,11 @@
 import Foundation
 
 struct ChatMessage: Identifiable, Sendable {
-    let id: UUID
+    let id: String
     let role: Role
-    let content: String
+    var content: String
     let timestamp: Date
+    var isStreaming: Bool
 
     enum Role: String, Sendable {
         case user
@@ -12,10 +13,15 @@ struct ChatMessage: Identifiable, Sendable {
         case system
     }
 
-    init(id: UUID = UUID(), role: Role, content: String, timestamp: Date = Date()) {
+    init(id: String = UUID().uuidString, role: Role, content: String, timestamp: Date = Date(), isStreaming: Bool = false) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
+        self.isStreaming = isStreaming
     }
+
+    var isUser: Bool { role == .user }
+    var isAssistant: Bool { role == .assistant }
+    var isLong: Bool { content.count > 500 }
 }

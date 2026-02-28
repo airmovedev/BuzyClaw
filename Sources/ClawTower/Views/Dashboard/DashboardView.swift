@@ -1,51 +1,36 @@
 import SwiftUI
 
 struct DashboardView: View {
-    @Environment(AppState.self) private var appState
-
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(spacing: 20) {
+                // Header
                 Text("Dashboard")
-                    .font(.largeTitle)
-                    .fontWeight(.bold)
+                    .font(.largeTitle.bold())
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
+                // Placeholder cards
                 HStack(spacing: 16) {
-                    StatusCard(
-                        title: "Gateway",
-                        value: appState.gatewayManager.status.displayText,
-                        color: appState.gatewayManager.status.statusColor,
-                        icon: "server.rack"
-                    )
-
-                    StatusCard(
-                        title: "对话",
-                        value: "0 条",
-                        color: .blue,
-                        icon: "bubble.left.and.bubble.right"
-                    )
-
-                    StatusCard(
-                        title: "任务",
-                        value: "0 个",
-                        color: .orange,
-                        icon: "checklist"
-                    )
+                    StatusCard(title: "Agent 状态", value: "—", icon: "cpu", color: .blue)
+                    StatusCard(title: "今日对话", value: "—", icon: "bubble.left.and.bubble.right", color: .green)
+                    StatusCard(title: "待办任务", value: "—", icon: "checklist", color: .orange)
                 }
 
-                Spacer()
+                Text("更多功能开发中...")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(24)
+            .padding(20)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.windowBackgroundColor))
     }
 }
 
-private struct StatusCard: View {
+struct StatusCard: View {
     let title: String
     let value: String
-    let color: Color
     let icon: String
+    let color: Color
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -53,16 +38,15 @@ private struct StatusCard: View {
                 Image(systemName: icon)
                     .foregroundStyle(color)
                 Text(title)
-                    .font(.headline)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Text(value)
-                .font(.title2)
-                .fontWeight(.semibold)
+                .font(.title2.bold())
         }
-        .padding()
-        .frame(minWidth: 160, alignment: .leading)
-        .background(.background.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Color(.controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 }

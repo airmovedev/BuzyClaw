@@ -1,42 +1,40 @@
 import SwiftUI
 
-@Observable
 @MainActor
+@Observable
 final class AppState {
-    var showOnboarding: Bool
-    var selectedNavigation: NavigationItem? = .dashboard
-    var gatewayManager = GatewayManager()
-    var gatewayClient = GatewayClient()
+    var gatewayManager: GatewayManager
+    var gatewayClient: GatewayClient
+    var selectedAgent: Agent?
+    var agents: [Agent] = []
+    var isOnboardingComplete: Bool
 
     init() {
-        self.showOnboarding = !UserDefaults.standard.bool(forKey: "onboardingCompleted")
+        let port = UserDefaults.standard.integer(forKey: "gatewayPort")
+        let effectivePort = port > 0 ? port : 18789
+        self.gatewayManager = GatewayManager(port: effectivePort)
+        self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:\(effectivePort)")!)
+        self.isOnboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
     }
 
     func completeOnboarding() {
-        UserDefaults.standard.set(true, forKey: "onboardingCompleted")
-        showOnboarding = false
-        Task {
-            await startGateway()
+        isOnboardingComplete = true
+        UserDefaults.standard.set(true, forKey: "onboardingComplete")
+    }
+
+    func loadAgents() async {
+        do {
+            agents = try await gatewayClient.listAgents()
+            if selectedAgent == nil, let first = agents.first {
+                selectedAgent = first
+            }
+        } catch {
+            // Gateway not reachable yet
         }
     }
 
-    func startGateway() async {
-        await gatewayManager.start()
-        if case .running(let port) = gatewayManager.status {
-            gatewayClient.configure(port: port)
-        }
-    }
-
-    func stopGateway() {
-        gatewayManager.stop()
-    }
-
-    func saveAPIKey(_ key: String) {
-        // Phase 0: UserDefaults stub. Production: store in Keychain.
-        UserDefaults.standard.set(key, forKey: "apiKey")
-    }
-
-    func loadAPIKey() -> String {
-        UserDefaults.standard.string(forKey: "apiKey") ?? ""
+    var sessionKey: String {
+        guard let agent = selectedAgent else { return "agent:main:main" }
+        return "agent:\(agent.id):\(agent.id)"
     }
 }

@@ -1,43 +1,99 @@
 import SwiftUI
 
 struct SidebarView: View {
-    @Environment(AppState.self) private var appState
+    @Bindable var appState: AppState
+
+    @State private var refreshTimer: Timer?
 
     var body: some View {
-        @Bindable var state = appState
-
-        List(selection: $state.selectedNavigation) {
-            Section("概览") {
-                Label("Dashboard", systemImage: "square.grid.2x2")
-                    .tag(NavigationItem.dashboard)
-            }
-
-            Section("工具") {
-                Label("项目", systemImage: "folder")
-                    .tag(NavigationItem.projects)
-                Label("定时任务", systemImage: "clock")
-                    .tag(NavigationItem.cronJobs)
-                Label("第二大脑", systemImage: "brain")
-                    .tag(NavigationItem.secondBrain)
-                Label("Skills", systemImage: "puzzlepiece")
-                    .tag(NavigationItem.skills)
-            }
-
-            Section("Agents") {
-                Label {
-                    Text("William")
-                } icon: {
-                    Text("🦉")
+        VStack(spacing: 0) {
+            List(selection: Binding(
+                get: { appState.selectedAgent?.id },
+                set: { newId in
+                    appState.selectedAgent = appState.agents.first { $0.id == newId }
                 }
-                .tag(NavigationItem.chat)
-            }
+            )) {
+                Section("导航") {
+                    NavigationLink(value: "dashboard") {
+                        Label("Dashboard", systemImage: "square.grid.2x2")
+                    }
 
-            Section {
-                Label("设置", systemImage: "gear")
-                    .tag(NavigationItem.settings)
+                    NavigationLink(value: "secondBrain") {
+                        Label("第二大脑", systemImage: "books.vertical")
+                    }
+
+                    NavigationLink(value: "projects") {
+                        Label("项目", systemImage: "folder")
+                    }
+
+                    NavigationLink(value: "cronJobs") {
+                        Label("定时任务", systemImage: "clock.badge.checkmark")
+                    }
+
+                    NavigationLink(value: "skills") {
+                        Label("Skills", systemImage: "puzzlepiece")
+                    }
+                }
+
+                Section("Agents") {
+                    if appState.agents.isEmpty {
+                        Text("连接 Gateway 后显示")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    } else {
+                        ForEach(appState.agents) { agent in
+                            HStack {
+                                Text(agent.emoji)
+                                Text(agent.displayName)
+                                    .lineLimit(1)
+                                Spacer()
+                                Circle()
+                                    .fill(agent.status == .online ? .green : .gray)
+                                    .frame(width: 8, height: 8)
+                            }
+                            .tag(agent.id)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                appState.selectedAgent = agent
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+
+            // Bottom bar
+            Divider()
+            HStack {
+                Button {
+                    // Navigate to settings
+                } label: {
+                    Image(systemName: "gear")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(appState.gatewayManager.isConnected ? .green : .red)
+                        .frame(width: 6, height: 6)
+                    Text(appState.gatewayManager.statusText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+        .task {
+            await appState.loadAgents()
+            // Refresh every 10s
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                await appState.loadAgents()
             }
         }
-        .listStyle(.sidebar)
-        .navigationTitle("ClawTower")
     }
 }

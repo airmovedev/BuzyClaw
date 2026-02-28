@@ -1,78 +1,69 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(AppState.self) private var appState
-    @State private var apiKey: String = ""
-    @State private var saveConfirmation = false
+    @Bindable var appState: AppState
+    @State private var apiKey = ""
+    @State private var gatewayPort = "18789"
 
     var body: some View {
-        Form {
-            Section("AI 账号") {
-                SecureField("API Key", text: $apiKey)
-                    .textFieldStyle(.roundedBorder)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("设置")
+                    .font(.largeTitle.bold())
 
-                HStack {
-                    Button("保存") {
-                        appState.saveAPIKey(apiKey)
-                        saveConfirmation = true
+                // Gateway Status
+                GroupBox("Gateway 状态") {
+                    HStack {
+                        Circle()
+                            .fill(appState.gatewayManager.isConnected ? .green : .red)
+                            .frame(width: 10, height: 10)
+                        Text(appState.gatewayManager.statusText)
+                        Spacer()
+                        Button("重新连接") {
+                            appState.gatewayManager.connect()
+                        }
                     }
-                    .disabled(apiKey.isEmpty)
+                    .padding(8)
+                }
 
-                    if saveConfirmation {
-                        Label("已保存", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                // AI Account
+                GroupBox("AI 账号") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("API Key")
+                            .font(.headline)
+                        SecureField("输入 API Key", text: $apiKey)
+                            .textFieldStyle(.roundedBorder)
+                        Text("存储在 macOS 钥匙串中，安全加密")
                             .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
+                    .padding(8)
+                }
+
+                // Gateway Port
+                GroupBox("高级设置") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Gateway 端口")
+                            .font(.headline)
+                        TextField("18789", text: $gatewayPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                    .padding(8)
+                }
+
+                // About
+                GroupBox("关于") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("ClawTower v1.0.0")
+                        Text("基于 OpenClaw 开源项目")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(8)
                 }
             }
-
-            Section("Gateway 状态") {
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(appState.gatewayManager.status.statusColor)
-                        .frame(width: 10, height: 10)
-                    Text(appState.gatewayManager.status.displayText)
-                        .font(.headline)
-                }
-
-                if case .running(let port) = appState.gatewayManager.status {
-                    LabeledContent("端口", value: "\(port)")
-                }
-
-                HStack(spacing: 12) {
-                    Button("启动") {
-                        Task { await appState.startGateway() }
-                    }
-                    .disabled(appState.gatewayManager.status.isRunning)
-
-                    Button("停止") {
-                        appState.stopGateway()
-                    }
-                    .disabled(!appState.gatewayManager.status.isRunning)
-
-                    Button("重启") {
-                        Task { await appState.gatewayManager.restart() }
-                    }
-                }
-            }
-
-            Section("数据") {
-                LabeledContent("数据目录") {
-                    Text("~/Library/Application Support/ClawTower/")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("关于") {
-                LabeledContent("版本", value: "0.1.0")
-                LabeledContent("基于", value: "OpenClaw 开源项目")
-            }
+            .padding(20)
         }
-        .formStyle(.grouped)
-        .navigationTitle("设置")
-        .onAppear {
-            apiKey = appState.loadAPIKey()
-        }
+        .background(Color(.windowBackgroundColor))
     }
 }

@@ -1,49 +1,37 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(AppState.self) private var appState
+    @State var appState = AppState()
 
     var body: some View {
         Group {
-            if appState.showOnboarding {
-                OnboardingView()
+            if appState.isOnboardingComplete {
+                mainView
             } else {
-                MainView()
+                OnboardingView(appState: appState)
             }
         }
+        .task {
+            appState.gatewayManager.connect()
+        }
     }
-}
 
-struct MainView: View {
-    var body: some View {
+    @ViewBuilder
+    private var mainView: some View {
         NavigationSplitView {
-            SidebarView()
+            SidebarView(appState: appState)
+                .frame(minWidth: 200)
         } detail: {
-            DetailView()
+            if let agent = appState.selectedAgent {
+                ChatView(
+                    agent: agent,
+                    client: appState.gatewayClient,
+                    sessionKey: appState.sessionKey
+                )
+            } else {
+                DashboardView()
+            }
         }
         .frame(minWidth: 800, minHeight: 500)
-    }
-}
-
-struct DetailView: View {
-    @Environment(AppState.self) private var appState
-
-    var body: some View {
-        switch appState.selectedNavigation {
-        case .dashboard, .none:
-            DashboardView()
-        case .secondBrain:
-            SecondBrainView()
-        case .projects:
-            ProjectsView()
-        case .cronJobs:
-            CronJobsView()
-        case .skills:
-            SkillsView()
-        case .chat:
-            ChatView()
-        case .settings:
-            SettingsView()
-        }
     }
 }

@@ -1,132 +1,210 @@
 import SwiftUI
+import MarkdownUI
 
 struct ChatView: View {
-    @Environment(AppState.self) private var appState
-    @State private var messageText = ""
+    let agent: Agent
+    let client: GatewayClient
+    let sessionKey: String
+
     @State private var messages: [ChatMessage] = []
+    @State private var inputText = ""
     @State private var isLoading = false
-    @State private var errorMessage: String?
+    @State private var isStreaming = false
+    @State private var expandedMessages: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
-            // Message list
+            // Header
+            HStack {
+                Text("\(agent.emoji) \(agent.displayName)")
+                    .font(.headline)
+                Spacer()
+                Circle()
+                    .fill(agent.status == .online ? .green : .red)
+                    .frame(width: 8, height: 8)
+                Text(agent.status == .online ? "在线" : "离线")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+
+            Divider()
+
+            // Messages
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(spacing: 12) {
                         ForEach(messages) { message in
-                            MessageBubble(message: message)
-                                .id(message.id)
-                        }
-
-                        if isLoading {
-                            HStack(spacing: 8) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("思考中...")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal)
+                            MessageBubble(
+                                message: message,
+                                agentEmoji: agent.emoji,
+                                isExpanded: expandedMessages.contains(message.id),
+                                onToggleExpand: {
+                                    if expandedMessages.contains(message.id) {
+                                        expandedMessages.remove(message.id)
+                                    } else {
+                                        expandedMessages.insert(message.id)
+                                    }
+                                }
+                            )
                         }
                     }
-                    .padding()
+                    .padding(16)
                 }
-                .onChange(of: messages.count) {
-                    if let lastMessage = messages.last {
+                .onChange(of: messages.count) { _, _ in
+                    if let last = messages.last {
                         withAnimation {
-                            proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                            proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
                 }
-            }
-
-            // Error banner
-            if let errorMessage {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle")
-                    Text(errorMessage)
-                    Spacer()
-                    Button("关闭") {
-                        self.errorMessage = nil
-                    }
-                    .buttonStyle(.plain)
-                }
-                .font(.caption)
-                .foregroundStyle(.white)
-                .padding(8)
-                .background(.red.opacity(0.8))
             }
 
             Divider()
 
-            // Input area
+            // Input
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("输入消息...", text: $messageText, axis: .vertical)
+                TextField("输入消息...", text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .lineLimit(1...5)
                     .onSubmit {
-                        sendMessage()
+                        if !inputText.isEmpty && !isStreaming {
+                            sendMessage()
+                        }
                     }
-                    .padding(8)
-                    .background(.background.secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                Button(action: sendMessage) {
-                    Image(systemName: "arrow.up.circle.fill")
+                Button {
+                    sendMessage()
+                } label: {
+                    Image(systemName: isStreaming ? "stop.circle.fill" : "arrow.up.circle.fill")
                         .font(.title2)
+                        .foregroundStyle(inputText.isEmpty && !isStreaming ? .secondary : Color.accentColor)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(messageText.isEmpty || isLoading ? .gray : .accentColor)
-                .disabled(messageText.isEmpty || isLoading)
+                .disabled(inputText.isEmpty && !isStreaming)
             }
             .padding(12)
+            .background(.bar)
         }
-        .navigationTitle("对话")
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+            await loadHistory()
+        }
+    }
+
+    private func loadHistory() async {
+        do {
+            messages = try await client.getHistory(sessionKey: sessionKey)
+        } catch {
+            // No history yet or gateway not connected
+        }
     }
 
     private func sendMessage() {
-        let content = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !content.isEmpty, !isLoading else { return }
+        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
 
-        let userMessage = ChatMessage(role: .user, content: content)
+        let userMessage = ChatMessage(role: .user, content: text)
         messages.append(userMessage)
-        messageText = ""
-        isLoading = true
-        errorMessage = nil
+        inputText = ""
+
+        let streamingId = UUID().uuidString
+        let streamingMessage = ChatMessage(id: streamingId, role: .assistant, content: "", isStreaming: true)
+        messages.append(streamingMessage)
+        isStreaming = true
 
         Task {
             do {
-                let response = try await appState.gatewayClient.sendChatMessage(content)
-                let assistantMessage = ChatMessage(role: .assistant, content: response)
-                messages.append(assistantMessage)
+                let stream = client.sendMessage(sessionKey: sessionKey, content: text)
+                for try await token in stream {
+                    if let idx = messages.firstIndex(where: { $0.id == streamingId }) {
+                        messages[idx].content += token
+                    }
+                }
+                if let idx = messages.firstIndex(where: { $0.id == streamingId }) {
+                    messages[idx].isStreaming = false
+                }
             } catch {
-                errorMessage = "AI 助手暂时无法响应，请确认 Gateway 已启动"
+                if let idx = messages.firstIndex(where: { $0.id == streamingId }) {
+                    messages[idx].content = "⚠️ 发送失败: \(error.localizedDescription)"
+                    messages[idx].isStreaming = false
+                }
             }
-            isLoading = false
+            isStreaming = false
         }
     }
 }
 
-private struct MessageBubble: View {
+// MARK: - Message Bubble
+
+struct MessageBubble: View {
     let message: ChatMessage
+    let agentEmoji: String
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
 
     var body: some View {
-        HStack {
-            if message.role == .user { Spacer(minLength: 60) }
+        HStack(alignment: .top, spacing: 8) {
+            if message.isUser {
+                Spacer(minLength: 60)
+            } else {
+                Text(agentEmoji)
+                    .font(.title3)
+            }
 
-            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
-                Text(message.content)
-                    .padding(10)
-                    .background(message.role == .user ? Color.accentColor : Color(.controlBackgroundColor))
-                    .foregroundStyle(message.role == .user ? .white : .primary)
+            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
+                if message.isStreaming && message.content.isEmpty {
+                    // Thinking animation
+                    HStack(spacing: 4) {
+                        ForEach(0..<3, id: \.self) { i in
+                            Circle()
+                                .fill(.secondary)
+                                .frame(width: 6, height: 6)
+                                .opacity(0.5)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.controlBackgroundColor))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+                } else {
+                    let displayContent = (!isExpanded && message.isLong)
+                        ? String(message.content.prefix(500)) + "..."
+                        : message.content
+
+                    Group {
+                        if message.isUser {
+                            Text(displayContent)
+                                .textSelection(.enabled)
+                        } else if message.content.count > 4000 {
+                            Text(displayContent)
+                                .textSelection(.enabled)
+                        } else {
+                            Markdown(displayContent)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(10)
+                    .background(message.isUser ? Color.accentColor.opacity(0.15) : Color(.controlBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                    if message.isLong {
+                        Button(isExpanded ? "收起" : "查看全部") {
+                            onToggleExpand()
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                }
 
                 Text(message.timestamp, style: .time)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
 
-            if message.role != .user { Spacer(minLength: 60) }
+            if !message.isUser {
+                Spacer(minLength: 60)
+            }
         }
     }
 }
