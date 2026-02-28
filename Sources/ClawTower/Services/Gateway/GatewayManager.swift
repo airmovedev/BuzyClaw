@@ -35,19 +35,59 @@ final class GatewayManager {
     private var healthCheckTask: Task<Void, Never>?
     private var restartCount = 0
     private let maxRestarts = 5
+    private var usingExternalGateway = false
 
     // MARK: - Start / Stop
 
     func startGateway() async {
         guard state == .stopped || isError else { return }
         restartCount = 0
+
+        // First, check if an existing gateway is already running (e.g., openclaw CLI service)
+        if await tryConnectExisting() {
+            return
+        }
+
         await launchProcess()
+    }
+
+    /// Try connecting to an existing gateway on the default port (18789).
+    /// Returns true if successful (reuses existing gateway).
+    private func tryConnectExisting() async -> Bool {
+        let existingPort = 18789
+        let existingToken = GatewayClient.readAuthToken()
+
+        let url = URL(string: "http://localhost:\(existingPort)/health")!
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 3
+        if let token = existingToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
+                port = existingPort
+                authToken = existingToken ?? ""
+                state = .running
+                usingExternalGateway = true
+                print("[Gateway] Connected to existing gateway on port \(existingPort)")
+                startHealthCheck()
+                return true
+            }
+        } catch {
+            // No existing gateway — will start our own
+        }
+        return false
     }
 
     func stopGateway() {
         healthCheckTask?.cancel()
         healthCheckTask = nil
-        terminateProcess()
+        if !usingExternalGateway {
+            terminateProcess()
+        }
+        usingExternalGateway = false
         state = .stopped
     }
 
