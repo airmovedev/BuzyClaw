@@ -60,6 +60,43 @@ final class GatewayManager {
 
     // MARK: - Process Lifecycle
 
+    /// Data directory for OpenClaw: ~/Library/Application Support/ClawTower/
+    private static var dataDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("ClawTower")
+    }
+
+    /// Resolve node + openclaw paths. Prefers bundled runtime, falls back to system-installed (dev mode).
+    private static func resolveRuntimePaths() -> (node: URL, openclaw: URL, bundled: Bool) {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
+            let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
+            if FileManager.default.fileExists(atPath: bundledNode.path)
+                && FileManager.default.fileExists(atPath: bundledOpenclaw.path)
+            {
+                return (bundledNode, bundledOpenclaw, true)
+            }
+        }
+        // Dev fallback
+        return (
+            URL(fileURLWithPath: "/usr/local/bin/node"),
+            URL(fileURLWithPath: "/usr/local/bin/openclaw"),
+            false
+        )
+    }
+
+    /// Ensure the node binary has execute permission.
+    private static func ensureExecutable(_ url: URL) {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return }
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+              let perms = attrs[.posixPermissions] as? Int
+        else { return }
+        if perms & 0o111 == 0 {
+            try? fm.setAttributes([.posixPermissions: perms | 0o755], ofItemAtPath: url.path)
+        }
+    }
+
     private func launchProcess() async {
         state = .starting
 
@@ -74,18 +111,45 @@ final class GatewayManager {
         // Generate auth token
         authToken = UUID().uuidString
 
+        // Ensure data directory exists
+        let dataDir = Self.dataDirectory
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+
+        // Resolve runtime paths
+        let paths = Self.resolveRuntimePaths()
+        Self.ensureExecutable(paths.node)
+
+        if paths.bundled {
+            print("[Gateway] Using bundled runtime: \(paths.node.path)")
+        } else {
+            print("[Gateway] Using system runtime (dev mode): \(paths.node.path)")
+        }
+
         // Set up the process
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/local/bin/node")
-        proc.arguments = [
-            "/usr/local/bin/openclaw", "gateway",
-            "--port", "\(port)",
-            "--allow-unconfigured",
-            "--bind", "loopback"
-        ]
+        proc.executableURL = paths.node
+
+        if paths.bundled {
+            proc.arguments = [
+                paths.openclaw.path, "gateway",
+                "--port", "\(port)",
+                "--allow-unconfigured",
+                "--bind", "loopback"
+            ]
+        } else {
+            // System openclaw is a standalone CLI, not an .mjs file
+            proc.arguments = [
+                paths.openclaw.path, "gateway",
+                "--port", "\(port)",
+                "--allow-unconfigured",
+                "--bind", "loopback"
+            ]
+        }
+
         proc.environment = [
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "OPENCLAW_GATEWAY_TOKEN": authToken,
+            "OPENCLAW_HOME": dataDir.path,
             "HOME": NSHomeDirectory()
         ]
 

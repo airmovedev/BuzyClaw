@@ -17,6 +17,9 @@ targets:
     platform: macOS
     sources:
       - Sources/ClawTower
+      - path: Resources
+        type: folder
+        buildPhase: resources
     info:
       path: SupportFiles/Info.plist
       properties:
