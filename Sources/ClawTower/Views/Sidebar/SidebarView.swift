@@ -68,7 +68,7 @@ struct SidebarView: View {
 
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(appState.gatewayManager.isConnected ? .green : .red)
+                        .fill(appState.gatewayManager.isRunning ? .green : .red)
                         .frame(width: 6, height: 6)
                     Text(appState.gatewayManager.statusText)
                         .font(.caption2)

@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @State var appState = AppState()
     @State private var selectedNavigation: NavigationItem? = .dashboard
+    var appDelegate: AppDelegate
 
     var body: some View {
         Group {
@@ -13,7 +14,12 @@ struct ContentView: View {
             }
         }
         .task {
-            appState.gatewayManager.connect()
+            // Wire up delegate so it can stop gateway on quit
+            appDelegate.appState = appState
+
+            if appState.isOnboardingComplete {
+                await appState.startGateway()
+            }
         }
     }
 

@@ -3,11 +3,12 @@ import Foundation
 struct Session: Identifiable, Sendable {
     var id: String { key }
     let key: String
-    let agentId: String
     let kind: String?
+    let channel: String?
     let label: String?
+    let displayName: String?
     let updatedAt: Date?
-    let messageCount: Int?
+    let model: String?
 
     var isMainSession: Bool {
         kind == nil || kind == "main"

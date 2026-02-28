@@ -1,10 +1,20 @@
 import SwiftUI
 
+class AppDelegate: NSObject, NSApplicationDelegate {
+    var appState: AppState?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appState?.stopGateway()
+    }
+}
+
 @main
 struct ClawTowerApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(appDelegate: appDelegate)
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1000, height: 700)

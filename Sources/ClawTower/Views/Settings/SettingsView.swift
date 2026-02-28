@@ -3,7 +3,6 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var appState: AppState
     @State private var apiKey = ""
-    @State private var gatewayPort = "18789"
 
     var body: some View {
         ScrollView {
@@ -13,14 +12,27 @@ struct SettingsView: View {
 
                 // Gateway Status
                 GroupBox("Gateway 状态") {
-                    HStack {
-                        Circle()
-                            .fill(appState.gatewayManager.isConnected ? .green : .red)
-                            .frame(width: 10, height: 10)
-                        Text(appState.gatewayManager.statusText)
-                        Spacer()
-                        Button("重新连接") {
-                            appState.gatewayManager.connect()
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Circle()
+                                .fill(statusColor)
+                                .frame(width: 10, height: 10)
+                            Text(appState.gatewayManager.statusText)
+                            Spacer()
+                            Button("重启") {
+                                Task { await appState.restartGateway() }
+                            }
+                        }
+
+                        if appState.gatewayManager.isRunning {
+                            HStack(spacing: 16) {
+                                Label("端口: \(appState.gatewayManager.port)", systemImage: "network")
+                                if let pid = appState.gatewayManager.pid {
+                                    Label("PID: \(pid)", systemImage: "gearshape")
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
                     }
                     .padding(8)
@@ -40,18 +52,6 @@ struct SettingsView: View {
                     .padding(8)
                 }
 
-                // Gateway Port
-                GroupBox("高级设置") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Gateway 端口")
-                            .font(.headline)
-                        TextField("18789", text: $gatewayPort)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 100)
-                    }
-                    .padding(8)
-                }
-
                 // About
                 GroupBox("关于") {
                     VStack(alignment: .leading, spacing: 4) {
@@ -65,5 +65,14 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(.windowBackgroundColor))
+    }
+
+    private var statusColor: Color {
+        switch appState.gatewayManager.state {
+        case .running: return .green
+        case .starting: return .orange
+        case .stopped: return .gray
+        case .error: return .red
+        }
     }
 }

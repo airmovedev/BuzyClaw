@@ -26,10 +26,8 @@ final class AppState {
     }
 
     init() {
-        let port = UserDefaults.standard.integer(forKey: "gatewayPort")
-        let effectivePort = port > 0 ? port : 18789
-        self.gatewayManager = GatewayManager(port: effectivePort)
-        self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:\(effectivePort)")!)
+        self.gatewayManager = GatewayManager()
+        self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:0")!)
         self.isOnboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
 
         if let bundled = Bundle.main.path(forResource: "openclaw", ofType: nil) {
@@ -42,6 +40,28 @@ final class AppState {
     func completeOnboarding() {
         isOnboardingComplete = true
         UserDefaults.standard.set(true, forKey: "onboardingComplete")
+    }
+
+    /// Start the gateway subprocess and update the client with the new port/token.
+    func startGateway() async {
+        await gatewayManager.startGateway()
+
+        // Update client to point at the gateway's actual port and token
+        let url = URL(string: "http://localhost:\(gatewayManager.port)")!
+        gatewayClient.updateBaseURL(url)
+        gatewayClient.setAuthToken(gatewayManager.authToken)
+    }
+
+    func stopGateway() {
+        gatewayManager.stopGateway()
+    }
+
+    func restartGateway() async {
+        await gatewayManager.restartGateway()
+
+        let url = URL(string: "http://localhost:\(gatewayManager.port)")!
+        gatewayClient.updateBaseURL(url)
+        gatewayClient.setAuthToken(gatewayManager.authToken)
     }
 
     func loadAgents() async {

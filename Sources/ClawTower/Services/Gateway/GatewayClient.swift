@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class GatewayClient: Sendable {
-    let baseURL: URL
+    private(set) var baseURL: URL
     private(set) var authToken: String?
 
     init(baseURL: URL) {
@@ -30,6 +30,16 @@ final class GatewayClient: Sendable {
         self.authToken = Self.readAuthToken()
     }
 
+    func setAuthToken(_ token: String?) {
+        self.authToken = token
+    }
+
+    func updateBaseURL(_ url: URL) {
+        self.baseURL = url
+    }
+
+    // MARK: - Authorized Requests
+
     /// Creates a URLRequest with auth headers set.
     private func authorizedRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url)
@@ -47,18 +57,48 @@ final class GatewayClient: Sendable {
         return request
     }
 
+    // MARK: - tools/invoke Generic
+
+    /// Calls POST /tools/invoke with the given tool name and arguments.
+    /// Returns the parsed JSON result dictionary.
+    private func toolsInvoke(tool: String, args: [String: Any] = [:]) async throws -> [String: Any] {
+        let url = baseURL.appendingPathComponent("tools/invoke")
+        var request = authorizedJSONRequest(url: url, method: "POST")
+
+        let body: [String: Any] = ["tool": tool, "args": args]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw GatewayError.badResponse
+        }
+
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw GatewayError.badResponse
+        }
+
+        // The response shape is {"ok": true, "result": {"content": [...], "details": {...}}}
+        // Return the top-level JSON; callers can dig into "result" as needed.
+        return json
+    }
+
     // MARK: - Agents
 
     func listAgents() async throws -> [Agent] {
-        let url = baseURL.appendingPathComponent("api/v1/agents")
-        let request = authorizedRequest(url: url)
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
-        return json.map { dict in
-            Agent(
-                id: dict["id"] as? String ?? "",
-                displayName: dict["name"] as? String ?? dict["id"] as? String ?? "",
-                emoji: dict["emoji"] as? String ?? "🤖",
+        let json = try await toolsInvoke(tool: "agents_list")
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? result
+        let agents = details["agents"] as? [[String: Any]]
+            ?? result["agents"] as? [[String: Any]]
+            ?? []
+        return agents.map { dict in
+            let id = dict["id"] as? String ?? ""
+            let name = dict["name"] as? String
+            return Agent(
+                id: id,
+                displayName: name ?? id,
+                emoji: "🤖",
                 status: .online,
                 model: dict["model"] as? String
             )
@@ -67,22 +107,24 @@ final class GatewayClient: Sendable {
 
     // MARK: - Sessions
 
-    func listSessions() async throws -> [Session] {
-        let url = baseURL.appendingPathComponent("api/v1/sessions")
-        let request = authorizedRequest(url: url)
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
-        return json.compactMap { dict in
+    func listSessions(limit: Int = 50) async throws -> [Session] {
+        let json = try await toolsInvoke(tool: "sessions_list", args: ["limit": limit])
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? result
+        let sessions = details["sessions"] as? [[String: Any]]
+            ?? result["sessions"] as? [[String: Any]]
+            ?? []
+        return sessions.compactMap { dict in
             guard let key = dict["key"] as? String else { return nil }
-            let agentId = dict["agentId"] as? String ?? ""
             let updatedAt: Date? = (dict["updatedAt"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
             return Session(
                 key: key,
-                agentId: agentId,
                 kind: dict["kind"] as? String,
+                channel: dict["channel"] as? String,
                 label: dict["label"] as? String,
+                displayName: dict["displayName"] as? String,
                 updatedAt: updatedAt,
-                messageCount: dict["messageCount"] as? Int
+                model: dict["model"] as? String
             )
         }
     }
@@ -90,12 +132,21 @@ final class GatewayClient: Sendable {
     // MARK: - Chat History
 
     func getHistory(sessionKey: String, limit: Int = 50) async throws -> [ChatMessage] {
-        var components = URLComponents(url: baseURL.appendingPathComponent("api/v1/sessions/\(sessionKey)/history"), resolvingAgainstBaseURL: false)!
-        components.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
-        let request = authorizedRequest(url: components.url!)
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
-        return json.compactMap { dict in
+        let json = try await toolsInvoke(tool: "sessions_history", args: ["sessionKey": sessionKey, "limit": limit])
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? result
+        // Messages may be at result.content, result.details.messages, or result.messages
+        let messagesArray: [[String: Any]]
+        if let content = result["content"] as? [[String: Any]] {
+            messagesArray = content
+        } else if let msgs = details["messages"] as? [[String: Any]] {
+            messagesArray = msgs
+        } else if let msgs = result["messages"] as? [[String: Any]] {
+            messagesArray = msgs
+        } else {
+            messagesArray = []
+        }
+        return messagesArray.compactMap { dict in
             guard let role = dict["role"] as? String,
                   let content = dict["content"] as? String else { return nil }
             let ts = (dict["timestamp"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? Date()
@@ -159,14 +210,16 @@ final class GatewayClient: Sendable {
     // MARK: - Cron Jobs
 
     func listCronJobs() async throws -> [CronJob] {
-        let url = baseURL.appendingPathComponent("api/v1/cron")
-        let request = authorizedRequest(url: url)
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        let jobs = json["jobs"] as? [[String: Any]] ?? []
+        let json = try await toolsInvoke(tool: "cron", args: ["action": "list"])
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? result
+        let jobs = details["jobs"] as? [[String: Any]]
+            ?? result["jobs"] as? [[String: Any]]
+            ?? []
         return jobs.map { dict in
             let schedule = dict["schedule"] as? [String: Any]
-            let scheduleStr = schedule?["expr"] as? String ?? schedule?["kind"] as? String ?? "unknown"
+            let scheduleStr = schedule?["expr"] as? String ?? schedule?["kind"] as? String
+                ?? dict["schedule"] as? String ?? "unknown"
             return CronJob(
                 id: dict["id"] as? String ?? dict["jobId"] as? String ?? "",
                 name: dict["name"] as? String,
@@ -178,17 +231,11 @@ final class GatewayClient: Sendable {
     }
 
     func triggerCron(jobId: String) async throws {
-        let url = baseURL.appendingPathComponent("api/v1/cron/\(jobId)/run")
-        var request = authorizedRequest(url: url)
-        request.httpMethod = "POST"
-        let (_, _) = try await URLSession.shared.data(for: request)
+        _ = try await toolsInvoke(tool: "cron", args: ["action": "run", "jobId": jobId])
     }
 
     func updateCron(jobId: String, enabled: Bool) async throws {
-        let url = baseURL.appendingPathComponent("api/v1/cron/\(jobId)")
-        var request = authorizedJSONRequest(url: url, method: "PATCH")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["enabled": enabled])
-        let (_, _) = try await URLSession.shared.data(for: request)
+        _ = try await toolsInvoke(tool: "cron", args: ["action": "update", "jobId": jobId, "enabled": enabled])
     }
 
     enum GatewayError: Error, LocalizedError {
