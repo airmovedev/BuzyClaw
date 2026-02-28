@@ -1,0 +1,45 @@
+name: ClawTower
+options:
+  bundleIdPrefix: com.clawtower
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+
+targets:
+  ClawTower:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/ClawTower
+    info:
+      path: SupportFiles/Info.plist
+      properties:
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+    entitlements:
+      path: SupportFiles/ClawTower.entitlements
+      properties: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clawtower.app
+        PRODUCT_NAME: ClawTower
+    dependencies:
+      - package: MarkdownUI
+        product: MarkdownUI
+      - package: Sparkle
+        product: Sparkle
+
+packages:
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: "2.4.0"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    from: "2.6.0"
