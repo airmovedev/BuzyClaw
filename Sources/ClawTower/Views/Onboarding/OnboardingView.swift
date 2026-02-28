@@ -8,10 +8,8 @@ struct OnboardingView: View {
     @State private var userName = ""
 
     @State private var authService = AuthService()
-    @State private var selectedProvider: String?
-    @State private var showManualKey = false
-    @State private var manualAPIKey = ""
-    @State private var manualProvider = "anthropic"
+    @State private var selectedProvider: AuthService.Provider?
+    @State private var apiKeyInput = ""
 
     private let totalSteps = 4
 
@@ -48,11 +46,10 @@ struct OnboardingView: View {
             HStack {
                 if currentStep > 0 {
                     Button("上一步") {
-                        if currentStep == 2 || currentStep == 1 {
-                            authService.cancel()
+                        if currentStep == 1 {
+                            authService.reset()
                             selectedProvider = nil
-                            showManualKey = false
-                            manualAPIKey = ""
+                            apiKeyInput = ""
                         }
                         currentStep -= 1
                     }
@@ -72,7 +69,7 @@ struct OnboardingView: View {
             }
             .padding(30)
         }
-        .frame(minWidth: 600, minHeight: 450)
+        .frame(minWidth: 600, minHeight: 500)
     }
 
     private var canAdvance: Bool {
@@ -110,66 +107,55 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Text("连接你的 AI 大脑")
                 .font(.title2.bold())
-            Text("选择一个 AI 服务开始认证")
+            Text("选择一个 AI 服务，粘贴你的 API Key")
                 .foregroundStyle(.secondary)
 
             // Provider cards
             HStack(spacing: 16) {
                 providerCard(
-                    id: "claude",
+                    provider: .anthropic,
                     name: "Claude",
                     subtitle: "Anthropic",
+                    description: "最擅长写作和分析",
                     icon: "brain.head.profile",
                     tint: .purple
                 )
                 providerCard(
-                    id: "openai",
+                    provider: .openai,
                     name: "ChatGPT",
                     subtitle: "OpenAI",
+                    description: "最擅长代码和推理",
                     icon: "bubble.left.and.bubble.right",
                     tint: .green
                 )
             }
 
-            // Auth flow area
-            if selectedProvider != nil || showManualKey {
-                authFlowSection
-            }
-
-            // Manual key link
-            if !showManualKey && !authService.isAuthenticated {
-                Button("我有 API Key，手动输入") {
-                    authService.cancel()
-                    selectedProvider = nil
-                    showManualKey = true
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .buttonStyle(.plain)
+            // Expanded instructions + key input for selected provider
+            if let provider = selectedProvider {
+                keyInputSection(provider: provider)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: selectedProvider)
     }
 
     private func providerCard(
-        id: String,
+        provider: AuthService.Provider,
         name: String,
         subtitle: String,
+        description: String,
         icon: String,
         tint: Color
     ) -> some View {
-        Button {
+        let isSelected = selectedProvider == provider
+
+        return Button {
             guard !authService.isAuthenticated else { return }
-            showManualKey = false
-            manualAPIKey = ""
-            selectedProvider = id
-            authService.cancel()
-            if id == "claude" {
-                authService.authenticateClaude(openclawPath: appState.openclawPath)
-            } else {
-                authService.authenticateOpenAI(openclawPath: appState.openclawPath)
-            }
+            authService.reset()
+            apiKeyInput = ""
+            selectedProvider = provider
         } label: {
-            VStack(spacing: 10) {
+            VStack(spacing: 8) {
                 Image(systemName: icon)
                     .font(.system(size: 32))
                     .foregroundStyle(tint)
@@ -178,181 +164,151 @@ struct OnboardingView: View {
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text(description)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 130)
+            .frame(height: 140)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(selectedProvider == id ? tint.opacity(0.1) : Color(.controlBackgroundColor))
+                    .fill(isSelected ? tint.opacity(0.1) : Color(.controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(selectedProvider == id ? tint : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? tint : Color.clear, lineWidth: 2)
             )
+            .overlay(alignment: .topTrailing) {
+                if authService.isAuthenticated && isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.title2)
+                        .padding(8)
+                }
+            }
         }
         .buttonStyle(.plain)
         .disabled(authService.isAuthenticated)
     }
 
-    // MARK: - Auth Flow Section
+    // MARK: - Key Input Section
 
-    @ViewBuilder
-    private var authFlowSection: some View {
-        if showManualKey {
-            manualKeySection
-        } else {
-            authProgressSection
-        }
-    }
+    private func keyInputSection(provider: AuthService.Provider) -> some View {
+        let isAnthropic = provider == .anthropic
+        let tint: Color = isAnthropic ? .purple : .green
+        let consoleName = isAnthropic ? "console.anthropic.com" : "platform.openai.com"
+        let consoleURL = isAnthropic
+            ? "https://console.anthropic.com"
+            : "https://platform.openai.com/api-keys"
+        let keyPath = isAnthropic
+            ? "Settings → API Keys"
+            : "API Keys → Create new secret key"
 
-    private var authProgressSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Status header
-            HStack(spacing: 8) {
-                switch authService.state {
-                case .idle:
-                    EmptyView()
-                case .authenticating:
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("正在初始化认证…")
-                        .foregroundStyle(.secondary)
-                case .waitingForUser(let url):
-                    ProgressView()
-                        .controlSize(.small)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("请在浏览器中完成认证")
-                            .foregroundStyle(.secondary)
-                        if let url, let linkURL = URL(string: url) {
-                            Link(url, destination: linkURL)
-                                .font(.caption)
-                        }
-                    }
-                case .success:
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.title2)
-                    Text("认证成功！")
-                        .font(.headline)
-                        .foregroundStyle(.green)
-                case .error(let message):
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                        .font(.title2)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("认证失败")
-                            .font(.headline)
-                            .foregroundStyle(.red)
-                        Text(message)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
+        return VStack(alignment: .leading, spacing: 14) {
+            // Instructions header
+            Text("获取你的 API Key：")
+                .font(.headline)
 
-            // Retry button on error
-            if case .error = authService.state, let provider = selectedProvider {
-                Button("重试") {
-                    if provider == "claude" {
-                        authService.authenticateClaude(openclawPath: appState.openclawPath)
-                    } else {
-                        authService.authenticateOpenAI(openclawPath: appState.openclawPath)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-            }
-
-            // Terminal output
-            if !authService.outputLines.isEmpty {
-                terminalOutput
-            }
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
-    }
-
-    private var terminalOutput: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
+            // Step 1
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 1, tint: tint)
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(authService.outputLines.enumerated()), id: \.offset) { index, line in
-                        Text(line)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .id(index)
+                    Text("前往 \(consoleName) 注册/登录")
+                        .font(.callout)
+                    Button {
+                        if let url = URL(string: consoleURL) {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        Text(consoleURL)
+                            .font(.caption)
+                            .foregroundStyle(tint)
+                            .underline()
                     }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxHeight: 100)
-            .onChange(of: authService.outputLines.count) {
-                if let last = authService.outputLines.indices.last {
-                    proxy.scrollTo(last, anchor: .bottom)
+                    .buttonStyle(.plain)
                 }
             }
-        }
-    }
 
-    // MARK: - Manual Key
-
-    private var manualKeySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("服务商", selection: $manualProvider) {
-                Text("Anthropic (Claude)").tag("anthropic")
-                Text("OpenAI (ChatGPT)").tag("openai")
+            // Step 2
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 2, tint: tint)
+                Text("在 \(keyPath) 中创建一个新的 Key")
+                    .font(.callout)
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 300)
 
-            SecureField("粘贴你的 API Key", text: $manualAPIKey)
-                .textFieldStyle(.roundedBorder)
+            // Step 3
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 3, tint: tint)
+                Text("复制 Key 并粘贴到下方")
+                    .font(.callout)
+            }
 
-            HStack {
-                Button("确认") {
-                    guard !manualAPIKey.isEmpty else { return }
-                    authService.pasteToken(
-                        openclawPath: appState.openclawPath,
-                        provider: manualProvider,
-                        apiKey: manualAPIKey
-                    )
+            // API Key input
+            HStack(spacing: 10) {
+                TextField("粘贴你的 API Key", text: $apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(authService.isAuthenticated)
+
+                Button {
+                    authService.verifyKey(provider: provider, apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines))
+                } label: {
+                    switch authService.state {
+                    case .verifying:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 60)
+                    case .verified:
+                        Label("已验证", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    default:
+                        Text("验证")
+                    }
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(manualAPIKey.isEmpty)
-
-                if authService.isAuthenticated {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("已验证")
-                        .foregroundStyle(.green)
-                        .font(.caption)
-                }
-
-                if case .error(let msg) = authService.state {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(msg)
-                        .foregroundStyle(.red)
-                        .font(.caption)
-                }
+                .tint(authService.isAuthenticated ? .green : tint)
+                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            Text("API Key 会通过 openclaw 安全存储")
+            // Status messages
+            switch authService.state {
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("API Key 验证成功！点击「下一步」继续")
+                        .foregroundStyle(.green)
+                }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+            default:
+                EmptyView()
+            }
+
+            Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
         .background(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: 12)
                 .fill(Color(.textBackgroundColor).opacity(0.5))
         )
+    }
+
+    private func stepBadge(number: Int, tint: Color) -> some View {
+        Text("\(number)")
+            .font(.caption2.bold())
+            .foregroundStyle(.white)
+            .frame(width: 20, height: 20)
+            .background(Circle().fill(tint))
     }
 
     // MARK: - Step 2: Personalize

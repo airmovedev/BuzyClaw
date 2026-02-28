@@ -14,6 +14,17 @@ final class AppState {
     /// For development, falls back to the system-installed openclaw.
     var openclawPath: String
 
+    /// The selected AI provider and API key (stored in UserDefaults for now).
+    var selectedProvider: AuthService.Provider? {
+        guard let raw = UserDefaults.standard.string(forKey: "selectedProvider"),
+              let provider = AuthService.Provider(rawValue: raw) else { return nil }
+        return provider
+    }
+
+    var apiKey: String? {
+        UserDefaults.standard.string(forKey: "apiKey")
+    }
+
     init() {
         let port = UserDefaults.standard.integer(forKey: "gatewayPort")
         let effectivePort = port > 0 ? port : 18789

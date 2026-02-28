@@ -8,190 +8,122 @@ final class AuthService {
 
     enum AuthState: Equatable, Sendable {
         case idle
-        case authenticating
-        case waitingForUser(url: String?)
-        case success
+        case verifying
+        case verified
         case error(String)
     }
 
-    enum ProcessEvent: Sendable {
-        case output(String)
-        case pid(Int32)
-        case exit(Int32)
-    }
-
-    /// Wrapper to allow retaining Process across @Sendable boundaries.
-    private final class ProcessRef: @unchecked Sendable {
-        let process: Process
-        init(_ process: Process) { self.process = process }
+    enum Provider: String, Sendable {
+        case anthropic
+        case openai
     }
 
     // MARK: - State
 
     var state: AuthState = .idle
-    var outputLines: [String] = []
 
     private var currentTask: Task<Void, Never>?
-    private var runningPID: Int32?
 
     var isAuthenticated: Bool {
-        if case .success = state { return true }
+        if case .verified = state { return true }
         return false
+    }
+
+    // MARK: - Stored Keys
+
+    var storedProvider: Provider? {
+        guard let raw = UserDefaults.standard.string(forKey: "selectedProvider"),
+              let provider = Provider(rawValue: raw) else { return nil }
+        return provider
+    }
+
+    var storedAPIKey: String? {
+        UserDefaults.standard.string(forKey: "apiKey")
+    }
+
+    func saveKey(provider: Provider, apiKey: String) {
+        UserDefaults.standard.set(provider.rawValue, forKey: "selectedProvider")
+        UserDefaults.standard.set(apiKey, forKey: "apiKey")
+    }
+
+    func clearKey() {
+        UserDefaults.standard.removeObject(forKey: "selectedProvider")
+        UserDefaults.standard.removeObject(forKey: "apiKey")
     }
 
     // MARK: - Public API
 
-    func authenticateClaude(openclawPath: String) {
-        runAuth(path: openclawPath, arguments: ["models", "auth", "setup-token", "--provider", "anthropic"])
-    }
-
-    func authenticateOpenAI(openclawPath: String) {
-        runAuth(path: openclawPath, arguments: ["models", "auth", "login", "--provider", "openai"])
-    }
-
-    func pasteToken(openclawPath: String, provider: String, apiKey: String) {
-        runAuth(
-            path: openclawPath,
-            arguments: ["models", "auth", "paste-token", "--provider", provider],
-            input: apiKey
-        )
-    }
-
-    func cancel() {
-        if let pid = runningPID {
-            kill(pid, SIGTERM)
-            runningPID = nil
-        }
+    func verifyKey(provider: Provider, apiKey: String) {
         currentTask?.cancel()
-        state = .idle
-        outputLines = []
+        state = .verifying
+
+        currentTask = Task {
+            do {
+                let valid: Bool
+                switch provider {
+                case .anthropic:
+                    valid = try await verifyAnthropicKey(apiKey: apiKey)
+                case .openai:
+                    valid = try await verifyOpenAIKey(apiKey: apiKey)
+                }
+
+                guard !Task.isCancelled else { return }
+
+                if valid {
+                    saveKey(provider: provider, apiKey: apiKey)
+                    state = .verified
+                } else {
+                    state = .error("API Key 无效，请检查后重试")
+                }
+            } catch is CancellationError {
+                // Cancelled — no state change
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error(error.localizedDescription)
+            }
+        }
     }
 
     func reset() {
-        cancel()
+        currentTask?.cancel()
+        state = .idle
     }
 
-    // MARK: - Private
+    // MARK: - Anthropic Verification
 
-    private func runAuth(path: String, arguments: [String], input: String? = nil) {
-        cancel()
-        state = .authenticating
-        outputLines = []
+    nonisolated private func verifyAnthropicKey(apiKey: String) async throws -> Bool {
+        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
 
-        currentTask = Task { [weak self] in
-            let events = Self.processEvents(path: path, arguments: arguments, input: input)
+        let body: [String: Any] = [
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1,
+            "messages": [
+                ["role": "user", "content": "hi"]
+            ]
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-            for await event in events {
-                guard let self, !Task.isCancelled else { return }
-                switch event {
-                case .output(let text):
-                    handleOutput(text)
-                case .pid(let pid):
-                    runningPID = pid
-                case .exit(let code):
-                    runningPID = nil
-                    if code == 0 {
-                        state = .success
-                    } else if case .idle = state {
-                        // Was cancelled — don't override
-                    } else {
-                        state = .error("认证失败 (代码: \(code))")
-                    }
-                }
-            }
-        }
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return false }
+
+        // 200 = success, anything else = bad key / error
+        return http.statusCode == 200
     }
 
-    private func handleOutput(_ text: String) {
-        let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
-        outputLines.append(contentsOf: lines)
+    // MARK: - OpenAI Verification
 
-        for line in lines {
-            if let url = Self.extractURL(from: line) {
-                state = .waitingForUser(url: url)
-            }
-        }
-    }
+    nonisolated private func verifyOpenAIKey(apiKey: String) async throws -> Bool {
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-    // MARK: - URL Detection
+        let (_, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return false }
 
-    private static func extractURL(from text: String) -> String? {
-        guard let detector = try? NSDataDetector(
-            types: NSTextCheckingResult.CheckingType.link.rawValue
-        ) else { return nil }
-
-        let range = NSRange(text.startIndex..., in: text)
-        if let match = detector.firstMatch(in: text, range: range),
-           let urlRange = Range(match.range, in: text) {
-            let urlString = String(text[urlRange])
-            // Only return http(s) URLs
-            if urlString.hasPrefix("http://") || urlString.hasPrefix("https://") {
-                return urlString
-            }
-        }
-        return nil
-    }
-
-    // MARK: - Process Execution
-
-    /// Runs an openclaw CLI command and streams events back via AsyncStream.
-    /// This is `nonisolated` + `static` so the Process work doesn't block MainActor.
-    nonisolated private static func processEvents(
-        path: String,
-        arguments: [String],
-        input: String?
-    ) -> AsyncStream<ProcessEvent> {
-        AsyncStream { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: path)
-            process.arguments = arguments
-            process.environment = ProcessInfo.processInfo.environment
-
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            process.standardOutput = outPipe
-            process.standardError = errPipe
-
-            if let inputText = input, let data = inputText.data(using: .utf8) {
-                let inPipe = Pipe()
-                process.standardInput = inPipe
-                inPipe.fileHandleForWriting.write(data)
-                inPipe.fileHandleForWriting.closeFile()
-            }
-
-            outPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                continuation.yield(.output(text))
-            }
-
-            errPipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                continuation.yield(.output(text))
-            }
-
-            process.terminationHandler = { proc in
-                continuation.yield(.exit(proc.terminationStatus))
-                continuation.finish()
-            }
-
-            do {
-                try process.run()
-                let pid = process.processIdentifier
-                continuation.yield(.pid(pid))
-
-                // Retain process so it isn't deallocated before exit.
-                let ref = ProcessRef(process)
-                continuation.onTermination = { @Sendable _ in
-                    if ref.process.isRunning {
-                        ref.process.terminate()
-                    }
-                }
-            } catch {
-                continuation.yield(.exit(-1))
-                continuation.finish()
-            }
-        }
+        return http.statusCode == 200
     }
 }
