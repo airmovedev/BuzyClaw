@@ -10,6 +10,8 @@ struct OnboardingView: View {
     @State private var authService = AuthService()
     @State private var selectedProvider: AuthService.Provider?
     @State private var apiKeyInput = ""
+    @State private var setupTokenInput = ""
+    @State private var claudeAuthMethod = 0 // 0 = API Key, 1 = Setup Token
 
     private let totalSteps = 4
 
@@ -133,7 +135,7 @@ struct OnboardingView: View {
             // Expanded section for selected provider
             if let provider = selectedProvider {
                 if provider == .anthropic {
-                    keyInputSection(provider: provider)
+                    anthropicAuthSection
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 } else {
                     oauthSection
@@ -194,6 +196,130 @@ struct OnboardingView: View {
         }
         .buttonStyle(.plain)
         .disabled(authService.isAuthenticated)
+    }
+
+    // MARK: - Anthropic Auth Section (API Key / Setup Token)
+
+    private var anthropicAuthSection: some View {
+        VStack(spacing: 16) {
+            Picker("认证方式", selection: $claudeAuthMethod) {
+                Text("API Key").tag(0)
+                Text("Setup Token").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .disabled(authService.isAuthenticated)
+            .onChange(of: claudeAuthMethod) {
+                if !authService.isAuthenticated {
+                    authService.reset()
+                }
+            }
+
+            if claudeAuthMethod == 0 {
+                keyInputSection(provider: .anthropic)
+            } else {
+                setupTokenSection
+            }
+        }
+    }
+
+    // MARK: - Setup Token Section
+
+    private var setupTokenSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("如果你已安装 Claude CLI，可以通过 Setup Token 连接：")
+                .font(.headline)
+
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 1, tint: .purple)
+                Text("打开终端 (Terminal)")
+                    .font(.callout)
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 2, tint: .purple)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("输入命令：")
+                        .font(.callout)
+                    Text("claude setup-token")
+                        .font(.system(.callout, design: .monospaced))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(.textBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .textSelection(.enabled)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 3, tint: .purple)
+                Text("按照提示完成授权后，复制获得的 Token")
+                    .font(.callout)
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                stepBadge(number: 4, tint: .purple)
+                Text("将 Token 粘贴到下方")
+                    .font(.callout)
+            }
+
+            // Token input
+            HStack(spacing: 10) {
+                TextField("粘贴你的 Setup Token", text: $setupTokenInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(authService.isAuthenticated)
+
+                Button {
+                    authService.verifyAnthropicSetupToken(token: setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines))
+                } label: {
+                    switch authService.state {
+                    case .verifying:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 60)
+                    case .verified:
+                        Label("已验证", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    default:
+                        Text("验证")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(authService.isAuthenticated ? .green : .purple)
+                .disabled(setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
+            }
+
+            // Status messages
+            switch authService.state {
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("Setup Token 验证成功！点击「下一步」继续")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+            default:
+                EmptyView()
+            }
+
+            Text("Token 仅存储在你的 Mac 上，不会上传到任何服务器")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
     }
 
     // MARK: - OpenAI OAuth Section
