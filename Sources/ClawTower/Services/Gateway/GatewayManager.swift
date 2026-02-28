@@ -28,9 +28,11 @@ final class GatewayManager {
     }
 
     private var healthCheckTask: Task<Void, Never>?
+    private var authToken: String?
 
     init(port: Int = 18789) {
         self.baseURL = URL(string: "http://localhost:\(port)")!
+        self.authToken = GatewayClient.readAuthToken()
     }
 
     func connect() {
@@ -55,10 +57,14 @@ final class GatewayManager {
     }
 
     private func checkHealth() async {
-        let url = baseURL.appendingPathComponent("api/v1/status")
+        // Use the base URL for health check
+        var request = URLRequest(url: baseURL)
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         do {
-            let (_, response) = try await URLSession.shared.data(from: url)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
                 if !isConnected {
                     state = .connected
                 }

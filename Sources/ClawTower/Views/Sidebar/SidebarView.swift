@@ -2,35 +2,29 @@ import SwiftUI
 
 struct SidebarView: View {
     @Bindable var appState: AppState
-
-    @State private var refreshTimer: Timer?
+    @Binding var selectedNavigation: NavigationItem?
 
     var body: some View {
         VStack(spacing: 0) {
-            List(selection: Binding(
-                get: { appState.selectedAgent?.id },
-                set: { newId in
-                    appState.selectedAgent = appState.agents.first { $0.id == newId }
-                }
-            )) {
+            List(selection: $selectedNavigation) {
                 Section("导航") {
-                    NavigationLink(value: "dashboard") {
+                    NavigationLink(value: NavigationItem.dashboard) {
                         Label("Dashboard", systemImage: "square.grid.2x2")
                     }
 
-                    NavigationLink(value: "secondBrain") {
+                    NavigationLink(value: NavigationItem.secondBrain) {
                         Label("第二大脑", systemImage: "books.vertical")
                     }
 
-                    NavigationLink(value: "projects") {
+                    NavigationLink(value: NavigationItem.projects) {
                         Label("项目", systemImage: "folder")
                     }
 
-                    NavigationLink(value: "cronJobs") {
+                    NavigationLink(value: NavigationItem.cronJobs) {
                         Label("定时任务", systemImage: "clock.badge.checkmark")
                     }
 
-                    NavigationLink(value: "skills") {
+                    NavigationLink(value: NavigationItem.skills) {
                         Label("Skills", systemImage: "puzzlepiece")
                     }
                 }
@@ -42,19 +36,16 @@ struct SidebarView: View {
                             .font(.caption)
                     } else {
                         ForEach(appState.agents) { agent in
-                            HStack {
-                                Text(agent.emoji)
-                                Text(agent.displayName)
-                                    .lineLimit(1)
-                                Spacer()
-                                Circle()
-                                    .fill(agent.status == .online ? .green : .gray)
-                                    .frame(width: 8, height: 8)
-                            }
-                            .tag(agent.id)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                appState.selectedAgent = agent
+                            NavigationLink(value: NavigationItem.chat(agentId: agent.id)) {
+                                HStack {
+                                    Text(agent.emoji)
+                                    Text(agent.displayName)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Circle()
+                                        .fill(agent.status == .online ? .green : .gray)
+                                        .frame(width: 8, height: 8)
+                                }
                             }
                         }
                     }
@@ -66,7 +57,7 @@ struct SidebarView: View {
             Divider()
             HStack {
                 Button {
-                    // Navigate to settings
+                    selectedNavigation = .settings
                 } label: {
                     Image(systemName: "gear")
                         .foregroundStyle(.secondary)
@@ -89,7 +80,6 @@ struct SidebarView: View {
         }
         .task {
             await appState.loadAgents()
-            // Refresh every 10s
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(10))
                 await appState.loadAgents()

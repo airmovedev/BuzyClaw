@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @State var appState = AppState()
+    @State private var selectedNavigation: NavigationItem? = .dashboard
 
     var body: some View {
         Group {
@@ -19,19 +20,39 @@ struct ContentView: View {
     @ViewBuilder
     private var mainView: some View {
         NavigationSplitView {
-            SidebarView(appState: appState)
+            SidebarView(appState: appState, selectedNavigation: $selectedNavigation)
                 .frame(minWidth: 200)
         } detail: {
-            if let agent = appState.selectedAgent {
+            detailView
+        }
+        .frame(minWidth: 800, minHeight: 500)
+    }
+
+    @ViewBuilder
+    private var detailView: some View {
+        switch selectedNavigation {
+        case .dashboard, .none:
+            DashboardView()
+        case .secondBrain:
+            SecondBrainView()
+        case .projects:
+            ProjectsView()
+        case .cronJobs:
+            CronJobsView()
+        case .skills:
+            SkillsView()
+        case .settings:
+            SettingsView(appState: appState)
+        case .chat(let agentId):
+            if let agent = appState.agents.first(where: { $0.id == agentId }) ?? appState.selectedAgent {
                 ChatView(
                     agent: agent,
                     client: appState.gatewayClient,
-                    sessionKey: appState.sessionKey
+                    sessionKey: "agent:\(agent.id):\(agent.id)"
                 )
             } else {
                 DashboardView()
             }
         }
-        .frame(minWidth: 800, minHeight: 500)
     }
 }

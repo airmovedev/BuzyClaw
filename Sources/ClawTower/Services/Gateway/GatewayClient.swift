@@ -3,16 +3,56 @@ import Foundation
 @MainActor
 final class GatewayClient: Sendable {
     let baseURL: URL
+    private(set) var authToken: String?
 
     init(baseURL: URL) {
         self.baseURL = baseURL
+        self.authToken = Self.readAuthToken()
+    }
+
+    // MARK: - Auth Token
+
+    /// Reads the Gateway auth token from ~/.openclaw/openclaw.json
+    static func readAuthToken() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let configURL = home.appendingPathComponent(".openclaw/openclaw.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let gateway = json["gateway"] as? [String: Any],
+              let auth = gateway["auth"] as? [String: Any],
+              let token = auth["token"] as? String else {
+            return nil
+        }
+        return token
+    }
+
+    func reloadAuthToken() {
+        self.authToken = Self.readAuthToken()
+    }
+
+    /// Creates a URLRequest with auth headers set.
+    private func authorizedRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        if let token = authToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+
+    /// Creates a URLRequest with auth and JSON content-type headers set.
+    private func authorizedJSONRequest(url: URL, method: String) -> URLRequest {
+        var request = authorizedRequest(url: url)
+        request.httpMethod = method
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
     }
 
     // MARK: - Agents
 
     func listAgents() async throws -> [Agent] {
         let url = baseURL.appendingPathComponent("api/v1/agents")
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let request = authorizedRequest(url: url)
+        let (data, _) = try await URLSession.shared.data(for: request)
         let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
         return json.map { dict in
             Agent(
@@ -29,7 +69,8 @@ final class GatewayClient: Sendable {
 
     func listSessions() async throws -> [Session] {
         let url = baseURL.appendingPathComponent("api/v1/sessions")
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let request = authorizedRequest(url: url)
+        let (data, _) = try await URLSession.shared.data(for: request)
         let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
         return json.compactMap { dict in
             guard let key = dict["key"] as? String else { return nil }
@@ -51,7 +92,8 @@ final class GatewayClient: Sendable {
     func getHistory(sessionKey: String, limit: Int = 50) async throws -> [ChatMessage] {
         var components = URLComponents(url: baseURL.appendingPathComponent("api/v1/sessions/\(sessionKey)/history"), resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
-        let (data, _) = try await URLSession.shared.data(from: components.url!)
+        let request = authorizedRequest(url: components.url!)
+        let (data, _) = try await URLSession.shared.data(for: request)
         let json = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] ?? []
         return json.compactMap { dict in
             guard let role = dict["role"] as? String,
@@ -72,10 +114,8 @@ final class GatewayClient: Sendable {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let url = baseURL.appendingPathComponent("api/v1/chat/completions")
-                    var request = URLRequest(url: url)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    let url = baseURL.appendingPathComponent("v1/chat/completions")
+                    var request = authorizedJSONRequest(url: url, method: "POST")
 
                     let body: [String: Any] = [
                         "model": "default",
@@ -120,7 +160,8 @@ final class GatewayClient: Sendable {
 
     func listCronJobs() async throws -> [CronJob] {
         let url = baseURL.appendingPathComponent("api/v1/cron")
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let request = authorizedRequest(url: url)
+        let (data, _) = try await URLSession.shared.data(for: request)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         let jobs = json["jobs"] as? [[String: Any]] ?? []
         return jobs.map { dict in
@@ -138,16 +179,14 @@ final class GatewayClient: Sendable {
 
     func triggerCron(jobId: String) async throws {
         let url = baseURL.appendingPathComponent("api/v1/cron/\(jobId)/run")
-        var request = URLRequest(url: url)
+        var request = authorizedRequest(url: url)
         request.httpMethod = "POST"
         let (_, _) = try await URLSession.shared.data(for: request)
     }
 
     func updateCron(jobId: String, enabled: Bool) async throws {
         let url = baseURL.appendingPathComponent("api/v1/cron/\(jobId)")
-        var request = URLRequest(url: url)
-        request.httpMethod = "PATCH"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var request = authorizedJSONRequest(url: url, method: "PATCH")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["enabled": enabled])
         let (_, _) = try await URLSession.shared.data(for: request)
     }
