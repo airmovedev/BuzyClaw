@@ -9,12 +9,23 @@ final class AppState {
     var agents: [Agent] = []
     var isOnboardingComplete: Bool
 
+    /// Path to the openclaw binary.
+    /// In production, this resolves to the bundled binary inside Resources/.
+    /// For development, falls back to the system-installed openclaw.
+    var openclawPath: String
+
     init() {
         let port = UserDefaults.standard.integer(forKey: "gatewayPort")
         let effectivePort = port > 0 ? port : 18789
         self.gatewayManager = GatewayManager(port: effectivePort)
         self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:\(effectivePort)")!)
         self.isOnboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
+
+        if let bundled = Bundle.main.path(forResource: "openclaw", ofType: nil) {
+            self.openclawPath = bundled
+        } else {
+            self.openclawPath = "/usr/local/bin/openclaw"
+        }
     }
 
     func completeOnboarding() {
