@@ -60,12 +60,6 @@ final class GatewayManager {
 
     // MARK: - Process Lifecycle
 
-    /// Data directory for OpenClaw: ~/Library/Application Support/ClawTower/
-    private static var dataDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("ClawTower")
-    }
-
     /// Resolve node + openclaw paths. Prefers bundled runtime, falls back to system-installed (dev mode).
     private static func resolveRuntimePaths() -> (node: URL, openclaw: URL, bundled: Bool) {
         if let resourceURL = Bundle.main.resourceURL {
@@ -111,9 +105,8 @@ final class GatewayManager {
         // Generate auth token
         authToken = UUID().uuidString
 
-        // Ensure data directory exists
-        let dataDir = Self.dataDirectory
-        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        // Data directory: use existing ~/.openclaw/ for now (shared with CLI)
+        // Future: migrate to ~/Library/Application Support/ClawTower/
 
         // Resolve runtime paths
         let paths = Self.resolveRuntimePaths()
@@ -149,8 +142,8 @@ final class GatewayManager {
         proc.environment = [
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "OPENCLAW_GATEWAY_TOKEN": authToken,
-            "OPENCLAW_HOME": dataDir.path,
-            "HOME": NSHomeDirectory()
+            "HOME": NSHomeDirectory(),
+            "NODE_NO_WARNINGS": "1"
         ]
 
         // Capture stdout/stderr
