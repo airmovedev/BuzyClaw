@@ -1,6 +1,11 @@
 import Foundation
 import Darwin
 
+enum GatewayMode: String, Sendable, CaseIterable {
+    case existingInstall
+    case freshInstall
+}
+
 @MainActor
 @Observable
 final class GatewayManager {
@@ -13,6 +18,7 @@ final class GatewayManager {
 
     // MARK: - Public State
 
+    var mode: GatewayMode = .freshInstall
     private(set) var state: State = .stopped
     private(set) var port: Int = 0
     private(set) var authToken: String = ""
@@ -43,12 +49,21 @@ final class GatewayManager {
         guard state == .stopped || isError else { return }
         restartCount = 0
 
-        // First, check if an existing gateway is already running (e.g., openclaw CLI service)
-        if await tryConnectExisting() {
-            return
-        }
+        switch mode {
+        case .existingInstall:
+            // Only try connecting to an existing gateway — never launch our own process
+            if await tryConnectExisting() {
+                return
+            }
+            state = .error("未找到运行中的 Gateway，请先启动 OpenClaw 服务")
 
-        await launchProcess()
+        case .freshInstall:
+            // Try existing first, fall back to launching our own process
+            if await tryConnectExisting() {
+                return
+            }
+            await launchProcess()
+        }
     }
 
     /// Try connecting to an existing gateway on the default port (18789).
@@ -179,10 +194,20 @@ final class GatewayManager {
             ]
         }
 
+        let homeDir: String
+        if mode == .freshInstall {
+            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            let clawTowerDir = appSupport.appendingPathComponent("ClawTower")
+            try? FileManager.default.createDirectory(at: clawTowerDir, withIntermediateDirectories: true)
+            homeDir = clawTowerDir.path
+        } else {
+            homeDir = NSHomeDirectory()
+        }
+
         proc.environment = [
             "PATH": "/usr/local/bin:/usr/bin:/bin",
             "OPENCLAW_GATEWAY_TOKEN": authToken,
-            "HOME": NSHomeDirectory(),
+            "HOME": homeDir,
             "NODE_NO_WARNINGS": "1"
         ]
 

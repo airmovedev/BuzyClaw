@@ -13,7 +13,12 @@ struct OnboardingView: View {
     @State private var setupTokenInput = ""
     @State private var claudeAuthMethod = 0 // 0 = API Key, 1 = Setup Token
 
-    private let totalSteps = 4
+    // Detection step state
+    @State private var existingInstallDetected = false
+    @State private var isDetecting = true
+    @State private var detectedAgentCount = 0
+
+    private let totalSteps = 5
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,9 +39,10 @@ struct OnboardingView: View {
             Group {
                 switch currentStep {
                 case 0: welcomeStep
-                case 1: providerStep
-                case 2: personalizeStep
-                case 3: readyStep
+                case 1: detectionStep
+                case 2: providerStep
+                case 3: personalizeStep
+                case 4: readyStep
                 default: EmptyView()
                 }
             }
@@ -46,9 +52,9 @@ struct OnboardingView: View {
 
             // Navigation
             HStack {
-                if currentStep > 0 {
+                if currentStep > 0 && currentStep != 1 {
                     Button("上一步") {
-                        if currentStep == 1 {
+                        if currentStep == 2 {
                             authService.reset()
                             selectedProvider = nil
                             apiKeyInput = ""
@@ -58,7 +64,10 @@ struct OnboardingView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
-                if currentStep < totalSteps - 1 {
+                if currentStep == 1 {
+                    // Detection step has its own navigation
+                    EmptyView()
+                } else if currentStep < totalSteps - 1 {
                     Button("下一步") { currentStep += 1 }
                         .buttonStyle(.borderedProminent)
                         .disabled(!canAdvance)
@@ -76,7 +85,8 @@ struct OnboardingView: View {
 
     private var canAdvance: Bool {
         switch currentStep {
-        case 1: return authService.isAuthenticated
+        case 1: return !isDetecting // Detection step
+        case 2: return authService.isAuthenticated
         default: return true
         }
     }
@@ -103,7 +113,105 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 1: Provider + Auth
+    // MARK: - Step 1: Detection
+
+    private var detectionStep: some View {
+        VStack(spacing: 20) {
+            if isDetecting {
+                ProgressView()
+                    .scaleEffect(1.5)
+                Text("正在检测已有安装...")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            } else if existingInstallDetected {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.green)
+                Text("发现已有 OpenClaw 安装")
+                    .font(.title2.bold())
+                Text("在 ~/.openclaw/ 中找到了已有的配置")
+                    .foregroundStyle(.secondary)
+
+                if detectedAgentCount > 0 {
+                    Text("包含 \(detectedAgentCount) 个 Agent")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(spacing: 12) {
+                    Button {
+                        appState.gatewayMode = .existingInstall
+                        // Skip provider step, go to personalize
+                        currentStep = 3
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.right.circle.fill")
+                            Text("使用已有配置")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Button {
+                        appState.gatewayMode = .freshInstall
+                        currentStep = 2
+                    } label: {
+                        HStack {
+                            Image(systemName: "plus.circle")
+                            Text("全新开始")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                }
+                .frame(maxWidth: 300)
+                .padding(.top, 10)
+            } else {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.blue)
+                Text("全新安装")
+                    .font(.title2.bold())
+                Text("将为你配置全新的 AI 助手环境")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            await detectExistingInstall()
+        }
+    }
+
+    private func detectExistingInstall() async {
+        isDetecting = true
+
+        // Brief delay for UX
+        try? await Task.sleep(for: .seconds(1))
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let configPath = home.appendingPathComponent(".openclaw/openclaw.json").path
+
+        if FileManager.default.fileExists(atPath: configPath) {
+            existingInstallDetected = true
+
+            // Count agents
+            let agentsDir = home.appendingPathComponent(".openclaw/agents")
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: agentsDir.path) {
+                detectedAgentCount = contents.filter { !$0.hasPrefix(".") }.count
+            }
+        } else {
+            existingInstallDetected = false
+            appState.gatewayMode = .freshInstall
+            // Auto-advance after brief pause
+            try? await Task.sleep(for: .seconds(1))
+            currentStep = 2
+        }
+
+        isDetecting = false
+    }
+
+    // MARK: - Step 2: Provider + Auth
 
     private var providerStep: some View {
         VStack(spacing: 20) {

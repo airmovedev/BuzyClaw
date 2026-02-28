@@ -9,6 +9,18 @@ final class AppState {
     var agents: [Agent] = []
     var isOnboardingComplete: Bool
 
+    var gatewayMode: GatewayMode {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: "gatewayMode"),
+                  let mode = GatewayMode(rawValue: raw) else { return .freshInstall }
+            return mode
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "gatewayMode")
+            gatewayManager.mode = newValue
+        }
+    }
+
     /// The selected AI provider and API key (stored in UserDefaults for now).
     var selectedProvider: AuthService.Provider? {
         guard let raw = UserDefaults.standard.string(forKey: "selectedProvider"),
@@ -21,7 +33,12 @@ final class AppState {
     }
 
     init() {
-        self.gatewayManager = GatewayManager()
+        let manager = GatewayManager()
+        if let raw = UserDefaults.standard.string(forKey: "gatewayMode"),
+           let mode = GatewayMode(rawValue: raw) {
+            manager.mode = mode
+        }
+        self.gatewayManager = manager
         self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:0")!)
         self.isOnboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
     }
