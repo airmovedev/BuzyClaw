@@ -107,7 +107,7 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Text("连接你的 AI 大脑")
                 .font(.title2.bold())
-            Text("选择一个 AI 服务，粘贴你的 API Key")
+            Text("选择一个 AI 服务来连接")
                 .foregroundStyle(.secondary)
 
             // Provider cards
@@ -130,10 +130,15 @@ struct OnboardingView: View {
                 )
             }
 
-            // Expanded instructions + key input for selected provider
+            // Expanded section for selected provider
             if let provider = selectedProvider {
-                keyInputSection(provider: provider)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                if provider == .anthropic {
+                    keyInputSection(provider: provider)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                } else {
+                    oauthSection
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
@@ -189,6 +194,76 @@ struct OnboardingView: View {
         }
         .buttonStyle(.plain)
         .disabled(authService.isAuthenticated)
+    }
+
+    // MARK: - OpenAI OAuth Section
+
+    private var oauthSection: some View {
+        VStack(spacing: 16) {
+            switch authService.state {
+            case .idle:
+                Button("使用 OpenAI 账号登录") {
+                    authService.authenticateOpenAIOAuth()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            case .launching:
+                Button("使用 OpenAI 账号登录") {
+                    authService.authenticateOpenAIOAuth()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(true)
+
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在启动...")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            case .waitingForBrowser(_):
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("请在浏览器中完成登录...")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("授权成功")
+                        .foregroundStyle(.green)
+                }
+                .font(.callout)
+            case .verifying:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("验证中...")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+
+                Button("重试") {
+                    authService.authenticateOpenAIOAuth()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
     }
 
     // MARK: - Key Input Section

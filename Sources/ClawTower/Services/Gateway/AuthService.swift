@@ -8,7 +8,9 @@ final class AuthService {
 
     enum AuthState: Equatable, Sendable {
         case idle
+        case launching
         case verifying
+        case waitingForBrowser(String)
         case verified
         case error(String)
     }
@@ -16,6 +18,12 @@ final class AuthService {
     enum Provider: String, Sendable {
         case anthropic
         case openai
+    }
+
+    private enum OAuthEvent: Sendable {
+        case output(String)
+        case exited(Int32)
+        case error(String)
     }
 
     // MARK: - State
@@ -84,9 +92,94 @@ final class AuthService {
         }
     }
 
+    func authenticateOpenAIOAuth() {
+        currentTask?.cancel()
+        state = .launching
+
+        let events = Self.oauthEventStream()
+
+        currentTask = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                switch event {
+                case .output(let text):
+                    for line in text.components(separatedBy: .newlines) where !line.isEmpty {
+                        if line.hasPrefix("Open:") {
+                            let url = line.replacingOccurrences(of: "Open:", with: "")
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !url.isEmpty {
+                                state = .waitingForBrowser(url)
+                            }
+                        }
+                        let lowered = line.lowercased()
+                        if lowered.contains("success") || lowered.contains("authenticated") || lowered.contains("logged in") {
+                            saveKey(provider: .openai, apiKey: "oauth")
+                            state = .verified
+                        }
+                    }
+                case .exited(let status):
+                    if status == 0 && !isAuthenticated {
+                        saveKey(provider: .openai, apiKey: "oauth")
+                        state = .verified
+                    } else if status != 0 && !isAuthenticated {
+                        state = .error("授权失败，请重试")
+                    }
+                case .error(let message):
+                    state = .error("启动授权失败：\(message)")
+                }
+            }
+        }
+    }
+
     func reset() {
         currentTask?.cancel()
         state = .idle
+    }
+
+    // MARK: - OpenAI OAuth Process
+
+    nonisolated private static func oauthEventStream() -> AsyncStream<OAuthEvent> {
+        AsyncStream { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/openclaw")
+            process.arguments = ["models", "auth", "login", "--provider", "openai"]
+            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+
+            var env = ProcessInfo.processInfo.environment
+            let existingPath = env["PATH"] ?? ""
+            env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + existingPath
+            process.environment = env
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+
+            let readHandle = pipe.fileHandleForReading
+
+            readHandle.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    readHandle.readabilityHandler = nil
+                    return
+                }
+                if let str = String(data: data, encoding: .utf8) {
+                    continuation.yield(.output(str))
+                }
+            }
+
+            process.terminationHandler = { proc in
+                readHandle.readabilityHandler = nil
+                continuation.yield(.exited(proc.terminationStatus))
+                continuation.finish()
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.yield(.error(error.localizedDescription))
+                continuation.finish()
+            }
+        }
     }
 
     // MARK: - Anthropic Verification
