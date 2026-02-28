@@ -39,6 +39,12 @@ final class AppState {
         let url = URL(string: "http://localhost:\(gatewayManager.port)")!
         gatewayClient.updateBaseURL(url)
         gatewayClient.setAuthToken(gatewayManager.authToken)
+
+        // Wait for gateway to become healthy (up to 30s)
+        for _ in 0..<30 {
+            if gatewayManager.isRunning { break }
+            try? await Task.sleep(for: .seconds(1))
+        }
     }
 
     func stopGateway() {

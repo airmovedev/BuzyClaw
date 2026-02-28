@@ -19,6 +19,15 @@ struct ContentView: View {
 
             if appState.isOnboardingComplete {
                 await appState.startGateway()
+                await appState.loadAgents()
+            }
+        }
+        .onChange(of: appState.isOnboardingComplete) { _, completed in
+            if completed {
+                Task {
+                    await appState.startGateway()
+                    await appState.loadAgents()
+                }
             }
         }
     }
