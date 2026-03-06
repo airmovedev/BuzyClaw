@@ -11,14 +11,29 @@ struct OnboardingView: View {
     @State private var selectedProvider: AuthService.Provider?
     @State private var apiKeyInput = ""
     @State private var setupTokenInput = ""
-    @State private var claudeAuthMethod = 0 // 0 = API Key, 1 = Setup Token
+    @State private var claudeAuthMethod = 0
 
     // Detection step state
     @State private var existingInstallDetected = false
+    @State private var existingAuthDetected = false
     @State private var isDetecting = true
     @State private var detectedAgentCount = 0
 
-    private let totalSteps = 5
+    // Step 3: Agent personality
+    @State private var selectedPersonality: String = ""
+    @State private var selectedProactiveness: String = "适度"
+    @State private var selectedFeedbackStyle: String = "委婉"
+
+    // Step 4: User info + scenarios
+    @State private var selectedSchedule: String = "正常"
+    @State private var selectedOccupations: Set<String> = []
+    @State private var customOccupation: String = ""
+    @State private var selectedScenarios: Set<String> = []
+
+    // Step 6: Tools profile
+    @State private var selectedToolsProfile: String = "full"
+
+    private let totalSteps = 8
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,9 +55,12 @@ struct OnboardingView: View {
                 switch currentStep {
                 case 0: welcomeStep
                 case 1: detectionStep
-                case 2: providerStep
-                case 3: personalizeStep
-                case 4: readyStep
+                case 2: nameStep
+                case 3: personalityStep
+                case 4: userInfoStep
+                case 5: providerStep
+                case 6: toolsProfileStep
+                case 7: readyStep
                 default: EmptyView()
                 }
             }
@@ -54,7 +72,11 @@ struct OnboardingView: View {
             HStack {
                 if currentStep > 0 && currentStep != 1 {
                     Button("上一步") {
-                        if currentStep == 2 {
+                        if currentStep == 7 && appState.gatewayMode == .existingInstall {
+                            currentStep = 1
+                            return
+                        }
+                        if currentStep == 5 {
                             authService.reset()
                             selectedProvider = nil
                             apiKeyInput = ""
@@ -65,14 +87,29 @@ struct OnboardingView: View {
                 }
                 Spacer()
                 if currentStep == 1 {
-                    // Detection step has its own navigation
                     EmptyView()
                 } else if currentStep < totalSteps - 1 {
                     Button("下一步") { currentStep += 1 }
                         .buttonStyle(.borderedProminent)
                         .disabled(!canAdvance)
                 } else {
-                    Button("开始使用") {
+                    Button("开始对话 →") {
+                        if appState.gatewayMode != .existingInstall {
+                            let generator = OnboardingProfileGenerator(
+                                agentName: agentName,
+                                agentEmoji: agentEmoji,
+                                selectedPersonality: selectedPersonality,
+                                selectedProactiveness: selectedProactiveness,
+                                selectedFeedbackStyle: selectedFeedbackStyle,
+                                userName: userName,
+                                selectedSchedule: selectedSchedule,
+                                selectedOccupations: selectedOccupations,
+                                selectedScenarios: selectedScenarios,
+                                gatewayMode: appState.gatewayMode,
+                                selectedToolsProfile: selectedToolsProfile
+                            )
+                            try? generator.generate()
+                        }
                         appState.completeOnboarding()
                     }
                     .buttonStyle(.borderedProminent)
@@ -85,8 +122,10 @@ struct OnboardingView: View {
 
     private var canAdvance: Bool {
         switch currentStep {
-        case 1: return !isDetecting // Detection step
-        case 2: return authService.isAuthenticated
+        case 1: return !isDetecting
+        case 3: return !selectedPersonality.isEmpty
+        case 4: return !selectedScenarios.isEmpty
+        case 5: return authService.isAuthenticated
         default: return true
         }
     }
@@ -97,15 +136,15 @@ struct OnboardingView: View {
         VStack(spacing: 20) {
             Text("🏗️")
                 .font(.system(size: 64))
-            Text("欢迎使用 ClawTower")
+            Text("找一个 AI 合伙人")
                 .font(.largeTitle.bold())
-            Text("你的私人 AI 助手，运行在你的 Mac 上")
+            Text("运行在你的 Mac 上，只为你工作")
                 .font(.title3)
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 12) {
-                Label("AI 助手完全本地运行", systemImage: "desktopcomputer")
-                Label("数据只属于你，不上传云端", systemImage: "lock.shield")
+                Label("完全本地运行，数据只属于你", systemImage: "lock.shield")
+                Label("有记忆、有性格、会主动工作", systemImage: "brain.head.profile")
                 Label("iPhone 远程访问，随时随地", systemImage: "iphone")
             }
             .font(.body)
@@ -141,8 +180,7 @@ struct OnboardingView: View {
                 VStack(spacing: 12) {
                     Button {
                         appState.gatewayMode = .existingInstall
-                        // Skip provider step, go to personalize
-                        currentStep = 3
+                        currentStep = existingAuthDetected ? 7 : 5
                     } label: {
                         HStack {
                             Image(systemName: "arrow.right.circle.fill")
@@ -185,8 +223,6 @@ struct OnboardingView: View {
 
     private func detectExistingInstall() async {
         isDetecting = true
-
-        // Brief delay for UX
         try? await Task.sleep(for: .seconds(1))
 
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -194,16 +230,23 @@ struct OnboardingView: View {
 
         if FileManager.default.fileExists(atPath: configPath) {
             existingInstallDetected = true
-
-            // Count agents
             let agentsDir = home.appendingPathComponent(".openclaw/agents")
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: agentsDir.path) {
                 detectedAgentCount = contents.filter { !$0.hasPrefix(".") }.count
             }
+            // Check if auth.profiles exists and is non-empty
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let auth = json["auth"] as? [String: Any],
+               let profiles = auth["profiles"] as? [String: Any],
+               !profiles.isEmpty {
+                existingAuthDetected = true
+            } else {
+                existingAuthDetected = false
+            }
         } else {
             existingInstallDetected = false
             appState.gatewayMode = .freshInstall
-            // Auto-advance after brief pause
             try? await Task.sleep(for: .seconds(1))
             currentStep = 2
         }
@@ -211,7 +254,218 @@ struct OnboardingView: View {
         isDetecting = false
     }
 
-    // MARK: - Step 2: Provider + Auth
+    // MARK: - Step 2: Name
+
+    private var nameStep: some View {
+        VStack(spacing: 20) {
+            Text("给你的合伙人起个名字")
+                .font(.title2.bold())
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("名字")
+                    .font(.headline)
+                TextField("给 TA 起个名字", text: $agentName)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("选一个 Emoji")
+                    .font(.headline)
+                HStack(spacing: 12) {
+                    ForEach(["🤖", "🦉", "🐱", "🧙", "🦊", "🐸", "⚡", "🎭"], id: \.self) { emoji in
+                        Button(emoji) { agentEmoji = emoji }
+                            .font(.title)
+                            .padding(6)
+                            .background(agentEmoji == emoji ? Color.accentColor.opacity(0.2) : .clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Step 3: Personality
+
+    private var personalityStep: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Text("TA 的性格是？")
+                    .font(.title2.bold())
+
+                // 1. Speaking style (4 choices)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("说话风格")
+                        .font(.headline)
+                    personalityCard(id: "professional", emoji: "🎯", title: "专业高效", desc: "简洁精准，不废话")
+                    personalityCard(id: "warm", emoji: "😊", title: "温暖贴心", desc: "耐心友善，像朋友")
+                    personalityCard(id: "witty", emoji: "😏", title: "幽默毒舌", desc: "有态度有个性，敢怼你")
+                    personalityCard(id: "rational", emoji: "📚", title: "沉稳理性", desc: "客观冷静，逻辑导向")
+                }
+
+                // 2. Proactiveness (3 choices)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("主动程度")
+                        .font(.headline)
+                    Picker("主动程度", selection: $selectedProactiveness) {
+                        Text("🐑 被动").tag("被动")
+                        Text("🐕 适度主动").tag("适度")
+                        Text("🦉 高度主动").tag("高度")
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(proactivenessHint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // 3. Feedback style (2 choices)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("犯错提醒方式")
+                        .font(.headline)
+                    Picker("犯错提醒方式", selection: $selectedFeedbackStyle) {
+                        Text("🤝 委婉建议").tag("委婉")
+                        Text("⚡ 直接指出").tag("直接")
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private var proactivenessHint: String {
+        switch selectedProactiveness {
+        case "被动": return "你说什么做什么，不多嘴"
+        case "适度": return "发现问题会提醒，有建议会说"
+        case "高度": return "主动调研、主动建议、主动做事"
+        default: return ""
+        }
+    }
+
+    private func personalityCard(id: String, emoji: String, title: String, desc: String) -> some View {
+        let isSelected = selectedPersonality == id
+        return Button {
+            selectedPersonality = id
+        } label: {
+            HStack(spacing: 12) {
+                Text(emoji).font(.title2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    Text(desc).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.1) : Color(.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Step 4: User Info + Scenarios
+
+    private var userInfoStep: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                Text("让合伙人了解你")
+                    .font(.title2.bold())
+
+                // 1. Name
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("你的称呼")
+                        .font(.headline)
+                    TextField("助手怎么称呼你？", text: $userName)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // 2. Schedule
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("作息习惯")
+                        .font(.headline)
+                    Picker("作息习惯", selection: $selectedSchedule) {
+                        Text("🌅 早起型").tag("早起")
+                        Text("🌙 夜猫子").tag("夜猫")
+                        Text("⏰ 正常作息").tag("正常")
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                // 3. Occupation tags
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("职业/身份")
+                        .font(.headline)
+                    tagGrid(
+                        options: ["独立开发者", "产品经理", "设计师", "学生", "创业者", "自由职业", "上班族", "内容创作者"],
+                        selected: $selectedOccupations
+                    )
+                    HStack {
+                        TextField("自定义职业…", text: $customOccupation)
+                            .textFieldStyle(.roundedBorder)
+                        if !customOccupation.trimmingCharacters(in: .whitespaces).isEmpty {
+                            Button("添加") {
+                                selectedOccupations.insert(customOccupation.trimmingCharacters(in: .whitespaces))
+                                customOccupation = ""
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                // 4. Scenarios (at least 1)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("使用场景（至少选 1 个）")
+                        .font(.headline)
+                    tagGrid(
+                        options: ["💻 编程开发", "📝 写作内容", "🔍 研究分析", "📅 日程管理", "📋 项目管理", "🧠 知识管理", "🎨 创意设计", "💬 日常助手"],
+                        selected: $selectedScenarios
+                    )
+                }
+            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    private func tagGrid(options: [String], selected: Binding<Set<String>>) -> some View {
+        let columns = [GridItem(.adaptive(minimum: 100), spacing: 8)]
+        return LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(options, id: \.self) { option in
+                let isSelected = selected.wrappedValue.contains(option)
+                Button {
+                    if isSelected {
+                        selected.wrappedValue.remove(option)
+                    } else {
+                        selected.wrappedValue.insert(option)
+                    }
+                } label: {
+                    Text(option)
+                        .font(.callout)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color(.controlBackgroundColor))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - Step 5: Provider + Auth
 
     private var providerStep: some View {
         VStack(spacing: 20) {
@@ -220,7 +474,6 @@ struct OnboardingView: View {
             Text("选择一个 AI 服务来连接")
                 .foregroundStyle(.secondary)
 
-            // Provider cards
             HStack(spacing: 16) {
                 providerCard(
                     provider: .anthropic,
@@ -240,7 +493,6 @@ struct OnboardingView: View {
                 )
             }
 
-            // Expanded section for selected provider
             if let provider = selectedProvider {
                 if provider == .anthropic {
                     anthropicAuthSection
@@ -306,7 +558,7 @@ struct OnboardingView: View {
         .disabled(authService.isAuthenticated)
     }
 
-    // MARK: - Anthropic Auth Section (API Key / Setup Token)
+    // MARK: - Anthropic Auth Section
 
     private var anthropicAuthSection: some View {
         VStack(spacing: 16) {
@@ -370,7 +622,6 @@ struct OnboardingView: View {
                     .font(.callout)
             }
 
-            // Token input
             HStack(spacing: 10) {
                 TextField("粘贴你的 Setup Token", text: $setupTokenInput)
                     .textFieldStyle(.roundedBorder)
@@ -378,7 +629,10 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
-                    authService.verifyAnthropicSetupToken(token: setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines))
+                    let homeDir: String? = appState.gatewayMode == .freshInstall
+                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+                        : nil
+                    authService.verifyAnthropicSetupToken(token: setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
                 } label: {
                     switch authService.state {
                     case .verifying:
@@ -397,7 +651,6 @@ struct OnboardingView: View {
                 .disabled(setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            // Status messages
             switch authService.state {
             case .verified:
                 HStack(spacing: 6) {
@@ -433,17 +686,20 @@ struct OnboardingView: View {
     // MARK: - OpenAI OAuth Section
 
     private var oauthSection: some View {
-        VStack(spacing: 16) {
+        let oauthHomeDir: String? = appState.gatewayMode == .freshInstall
+            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+            : nil
+        return VStack(spacing: 16) {
             switch authService.state {
             case .idle:
                 Button("使用 OpenAI 账号登录") {
-                    authService.authenticateOpenAIOAuth()
+                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
             case .launching:
                 Button("使用 OpenAI 账号登录") {
-                    authService.authenticateOpenAIOAuth()
+                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -487,7 +743,7 @@ struct OnboardingView: View {
                 .font(.caption)
 
                 Button("重试") {
-                    authService.authenticateOpenAIOAuth()
+                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -514,11 +770,9 @@ struct OnboardingView: View {
             : "API Keys → Create new secret key"
 
         return VStack(alignment: .leading, spacing: 14) {
-            // Instructions header
             Text("获取你的 API Key：")
                 .font(.headline)
 
-            // Step 1
             HStack(alignment: .top, spacing: 10) {
                 stepBadge(number: 1, tint: tint)
                 VStack(alignment: .leading, spacing: 2) {
@@ -538,21 +792,18 @@ struct OnboardingView: View {
                 }
             }
 
-            // Step 2
             HStack(alignment: .top, spacing: 10) {
                 stepBadge(number: 2, tint: tint)
                 Text("在 \(keyPath) 中创建一个新的 Key")
                     .font(.callout)
             }
 
-            // Step 3
             HStack(alignment: .top, spacing: 10) {
                 stepBadge(number: 3, tint: tint)
                 Text("复制 Key 并粘贴到下方")
                     .font(.callout)
             }
 
-            // API Key input
             HStack(spacing: 10) {
                 TextField("粘贴你的 API Key", text: $apiKeyInput)
                     .textFieldStyle(.roundedBorder)
@@ -579,7 +830,6 @@ struct OnboardingView: View {
                 .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            // Status messages
             switch authService.state {
             case .verified:
                 HStack(spacing: 6) {
@@ -620,49 +870,126 @@ struct OnboardingView: View {
             .background(Circle().fill(tint))
     }
 
-    // MARK: - Step 2: Personalize
+    // MARK: - Step 6: Tools Profile
 
-    private var personalizeStep: some View {
+    private var toolsProfileStep: some View {
         VStack(spacing: 20) {
-            Text("认识你的助手")
+            Text("选择工具权限")
                 .font(.title2.bold())
+            Text("Tools Profile — 控制 AI 可使用的工具范围")
+                .foregroundStyle(.secondary)
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text("助手名字")
-                    .font(.headline)
-                TextField("给 TA 起个名字", text: $agentName)
-                    .textFieldStyle(.roundedBorder)
-
-                Text("选一个 Emoji")
-                    .font(.headline)
-                HStack(spacing: 12) {
-                    ForEach(["🤖", "🦉", "🐱", "🧙", "🦊", "🐸", "⚡", "🎭"], id: \.self) { emoji in
-                        Button(emoji) { agentEmoji = emoji }
-                            .font(.title)
-                            .padding(6)
-                            .background(agentEmoji == emoji ? Color.accentColor.opacity(0.2) : .clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-
-                Text("你的昵称")
-                    .font(.headline)
-                TextField("助手怎么称呼你？", text: $userName)
-                    .textFieldStyle(.roundedBorder)
+            VStack(spacing: 10) {
+                toolsProfileCard(
+                    id: "full",
+                    emoji: "🔓",
+                    title: "完整 Full",
+                    desc: "全部工具开放（文件、终端、浏览器、消息等）"
+                )
+                toolsProfileCard(
+                    id: "coding",
+                    emoji: "💻",
+                    title: "编程 Coding",
+                    desc: "面向开发：读写文件、执行命令等"
+                )
+                toolsProfileCard(
+                    id: "messaging",
+                    emoji: "💬",
+                    title: "消息 Messaging",
+                    desc: "消息、搜索、记忆等安全工具，无系统权限"
+                )
+                toolsProfileCard(
+                    id: "minimal",
+                    emoji: "🔒",
+                    title: "精简 Minimal",
+                    desc: "最精简，基本只有对话能力"
+                )
             }
         }
     }
 
-    // MARK: - Step 3: Ready
+    private func toolsProfileCard(id: String, emoji: String, title: String, desc: String) -> some View {
+        let isSelected = selectedToolsProfile == id
+        return Button {
+            selectedToolsProfile = id
+        } label: {
+            HStack(spacing: 12) {
+                Text(emoji).font(.title2)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.headline)
+                    Text(desc).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .padding(12)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isSelected ? Color.accentColor.opacity(0.1) : Color(.controlBackgroundColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Step 7: Ready
 
     private var readyStep: some View {
         VStack(spacing: 20) {
-            Text(agentEmoji)
-                .font(.system(size: 64))
-            Text("一切就绪！")
-                .font(.title.bold())
-            Text("\(agentName) 已经准备好为你服务了")
-                .foregroundStyle(.secondary)
+            if appState.gatewayMode == .existingInstall {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.green)
+                Text("一切就绪！")
+                    .font(.title.bold())
+
+                VStack(spacing: 8) {
+                    Text("已检测到你的 OpenClaw 配置")
+                        .font(.title3)
+                    Text("点击「开始对话 →」即可启动")
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .background(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(.controlBackgroundColor))
+                )
+            } else {
+                Text(agentEmoji)
+                    .font(.system(size: 64))
+                Text(agentName)
+                    .font(.title.bold())
+
+                Text(readySummary)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Text("📱 手机端可在 App Store 搜索「ClawTower」下载，远程连接控制你的 AI Agent。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 8)
+            }
         }
+    }
+
+    private var readySummary: String {
+        let style: String
+        switch selectedPersonality {
+        case "professional": style = "专业高效"
+        case "warm": style = "温暖贴心"
+        case "witty": style = "幽默毒舌"
+        case "rational": style = "沉稳理性"
+        default: style = "全能"
+        }
+        let scenes = selectedScenarios.joined(separator: "、")
+        return "你的\(style)助手，帮你\(scenes)"
     }
 }

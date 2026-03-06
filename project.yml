@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.clawtower
   deploymentTarget:
     macOS: "14.0"
+    iOS: "18.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
@@ -17,9 +18,13 @@ targets:
     platform: macOS
     sources:
       - Sources/ClawTower
+      - path: Sources/ClawTowerMobile/Models/DashboardSnapshot.swift
+        type: file
       - path: Resources
         type: folder
         buildPhase: resources
+    resources:
+      - path: Sources/ClawTower/Resources/Assets.xcassets
     info:
       path: SupportFiles/Info.plist
       properties:
@@ -28,21 +33,91 @@ targets:
         LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
     entitlements:
       path: SupportFiles/ClawTower.entitlements
-      properties: {}
+      properties:
+        com.apple.developer.icloud-services:
+          - CloudKit
+        com.apple.developer.icloud-container-identifiers:
+          - iCloud.com.clawtower.app
+        com.apple.security.network.client: true
+    preBuildScripts:
+      - name: Prepare OpenClaw Runtime
+        script: |
+          if [ "$CONFIGURATION" = "Release" ] || [ ! -f "$SRCROOT/Resources/runtime/openclaw/docs/reference/templates/AGENTS.md" ]; then
+            "$SRCROOT/Scripts/prepare-runtime.sh"
+          else
+            echo "⏭ Runtime looks complete, skipping sync (use Release build to force)"
+          fi
+        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.clawtower.app
         PRODUCT_NAME: ClawTower
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: USYB32X4N8
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGNING_REQUIRED: true
     dependencies:
-      - package: MarkdownUI
-        product: MarkdownUI
       - package: Sparkle
         product: Sparkle
 
+  ClawTowerMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/ClawTowerMobile
+        type: group
+      - path: Sources/ClawTower/Services/CloudKit/MessageRecord.swift
+        type: file
+      - path: Sources/ClawTower/Models/CronJob.swift
+        type: file
+    resources:
+      - path: Sources/ClawTowerMobile/Resources/Assets.xcassets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.clawtower.mobile
+        INFOPLIST_FILE: SupportFiles/MobileInfo.plist
+        CODE_SIGN_ENTITLEMENTS: SupportFiles/ClawTowerMobile.entitlements
+        PRODUCT_NAME: ClawTowerMobile
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "6"
+        GENERATE_INFOPLIST_FILE: false
+        CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGNING_REQUIRED: true
+        DEVELOPMENT_TEAM: USYB32X4N8
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_EMIT_LOC_STRINGS: true
+        ENABLE_PREVIEWS: true
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  ClawTower:
+    build:
+      targets:
+        ClawTower: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+  ClawTowerMobile:
+    build:
+      targets:
+        ClawTowerMobile: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+
 packages:
-  MarkdownUI:
-    url: https://github.com/gonzalezreal/swift-markdown-ui
-    from: "2.4.0"
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"

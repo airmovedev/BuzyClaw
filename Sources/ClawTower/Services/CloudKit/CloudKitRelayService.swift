@@ -1,0 +1,927 @@
+import CloudKit
+import Foundation
+import os.log
+
+/// CloudKit Relay service that syncs messages between iOS and macOS via iCloud Private Database.
+/// On macOS, it monitors for `toGateway` messages, forwards them to the local Gateway,
+/// and writes back responses as `fromGateway` messages.
+@MainActor
+@Observable
+final class CloudKitRelayService {
+    // MARK: - Observable state
+
+    var isRunning = false
+    var lastSyncDate: Date?
+    var lastError: String?
+    var pendingMessageCount = 0
+
+    // MARK: - Private
+
+    // Created on first access to avoid SIGTRAP when CloudKit entitlements are absent.
+    @ObservationIgnored private var cachedContainer: CKContainer?
+    @ObservationIgnored private var cachedDatabase: CKDatabase?
+    private var container: CKContainer {
+        if let c = cachedContainer { return c }
+        let c = CKContainer(identifier: CloudKitConstants.containerID)
+        cachedContainer = c
+        return c
+    }
+    private var database: CKDatabase {
+        if let d = cachedDatabase { return d }
+        let d = container.privateCloudDatabase
+        cachedDatabase = d
+        return d
+    }
+    private var syncEngine: CKSyncEngine?
+    private var relayClient: GatewayRelayClient?
+    private var pollingTask: Task<Void, Never>?
+    private var processingMessageIDs: Set<String> = []
+    private var processedClientMessageIDs: Set<String> = []
+    private var syncedCronRunIDs: Set<String> = []
+    private var isCronInitialBackfill = false
+    private var sessionHistoryLastSyncedMs: [String: Double] = [:]
+    private var syncedGatewayMessageIDs: [String: Set<String>] = [:]
+
+    /// Persisted sync engine state (token, etc.)
+    private var lastSyncEngineState: CKSyncEngine.State.Serialization?
+
+    private let logger = Logger(subsystem: "com.clawtower.app", category: "CloudKitRelay")
+    private static let stateKey = "CloudKitSyncEngineState"
+    private static let cronRunSyncedIDsKey = "CronRunSyncedIDs"
+    private static let directFetchTokenKey = "CloudKitRelayZoneChangeToken"
+    private static let processedClientMessageIDsKey = "ProcessedClientMessageIDs"
+    private static let sessionCursorKey = "CloudKitRelaySessionHistoryLastSyncedMs"
+    private static let sessionSyncedIDsKey = "CloudKitRelaySessionHistorySyncedIDs"
+    private static let monitoredMainSessions = [
+        "agent:main:main",
+    ]
+
+    init() {
+        // CKContainer is created lazily to avoid SIGTRAP when CloudKit entitlements are absent.
+        NSLog("[CloudKitRelay] init — deferred container creation for: %@", CloudKitConstants.containerID)
+    }
+
+    // MARK: - iCloud status
+
+    func checkiCloudStatus() async -> CKAccountStatus {
+        do {
+            return try await container.accountStatus()
+        } catch {
+            NSLog("[CloudKitRelay] Failed to check iCloud status: %@", error.localizedDescription)
+            return .couldNotDetermine
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    func start(gatewayBaseURL: URL, authToken: String) {
+        guard !isRunning else {
+            NSLog("[CloudKitRelay] already running, skipping start")
+            return
+        }
+
+        // Validate port is non-zero
+        if let port = gatewayBaseURL.port, port == 0 {
+            NSLog("[CloudKitRelay] ⚠️ WARNING: gateway port is 0! URL=%@", gatewayBaseURL.absoluteString)
+        }
+
+        NSLog("[CloudKitRelay] start() called — gateway: %@", gatewayBaseURL.absoluteString)
+        logger.info("Starting CloudKit Relay Service")
+        relayClient = GatewayRelayClient(baseURL: gatewayBaseURL, authToken: authToken)
+
+        // Check iCloud status first
+        Task {
+            let status = await checkiCloudStatus()
+            guard status == .available else {
+                let msg: String
+                switch status {
+                case .noAccount: msg = "请先登录 iCloud"
+                case .restricted: msg = "iCloud 访问受限"
+                case .temporarilyUnavailable: msg = "iCloud 暂时不可用"
+                default: msg = "无法确定 iCloud 状态"
+                }
+                NSLog("[CloudKitRelay] iCloud not available: %@", msg)
+                lastError = msg
+                return
+            }
+            await self.startSyncEngine()
+        }
+    }
+
+    private static let envMigrationKey = "CloudKitEnvMigratedToDev"
+
+    /// Clear all cached sync state when switching CloudKit environment (e.g. Production → Development).
+    private func clearSyncStateIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.envMigrationKey) else { return }
+        NSLog("[CloudKitRelay] 🔄 Clearing sync state for CloudKit environment switch to Development")
+        UserDefaults.standard.removeObject(forKey: Self.stateKey)
+        UserDefaults.standard.removeObject(forKey: Self.directFetchTokenKey)
+        UserDefaults.standard.removeObject(forKey: Self.cronRunSyncedIDsKey)
+        UserDefaults.standard.removeObject(forKey: Self.processedClientMessageIDsKey)
+        UserDefaults.standard.removeObject(forKey: Self.sessionCursorKey)
+        UserDefaults.standard.removeObject(forKey: Self.sessionSyncedIDsKey)
+        UserDefaults.standard.set(true, forKey: Self.envMigrationKey)
+        NSLog("[CloudKitRelay] ✅ Sync state cleared")
+    }
+
+    private func startSyncEngine() {
+        do {
+            // One-time: clear cached sync state after environment switch
+            clearSyncStateIfNeeded()
+
+            // Load persisted sync state
+            lastSyncEngineState = loadSyncState()
+            syncedCronRunIDs = loadSyncedCronRunIDs()
+            processedClientMessageIDs = loadProcessedClientMessageIDs()
+            sessionHistoryLastSyncedMs = loadSessionHistoryCursors()
+            syncedGatewayMessageIDs = loadSessionSyncedMessageIDs()
+            isCronInitialBackfill = syncedCronRunIDs.isEmpty
+
+            // Load direct fetch change token
+            if let data = UserDefaults.standard.data(forKey: Self.directFetchTokenKey),
+               let token = try? NSKeyedUnarchiver.unarchivedObject(ofClass: CKServerChangeToken.self, from: data) {
+                directFetchChangeToken = token
+                NSLog("[CloudKitRelay] Loaded persisted direct fetch change token")
+            }
+
+            // Initialize session history cursors to "now" on first run to avoid backfilling old messages
+            if sessionHistoryLastSyncedMs.isEmpty {
+                let nowMs = Date().timeIntervalSince1970 * 1000
+                for sessionKey in Self.monitoredMainSessions {
+                    sessionHistoryLastSyncedMs[sessionKey] = nowMs
+                }
+                saveSessionHistoryCursors(sessionHistoryLastSyncedMs)
+            }
+
+            // Initialize CKSyncEngine
+            let delegate = SyncEngineDelegate(service: self)
+            let config = CKSyncEngine.Configuration(
+                database: database,
+                stateSerialization: lastSyncEngineState,
+                delegate: delegate
+            )
+            syncEngine = CKSyncEngine(config)
+            isRunning = true
+            lastError = nil
+            NSLog("[CloudKitRelay] Using container=%@ zone=%@", CloudKitConstants.containerID, CloudKitConstants.zoneID.zoneName)
+
+            // Start fallback polling (every 3 seconds)
+            startPolling()
+
+            NSLog("[CloudKitRelay] Service started, polling every 3s")
+            logger.info("CloudKit Relay Service started")
+        } catch {
+            NSLog("[CloudKitRelay] Failed to start sync engine: %@", error.localizedDescription)
+            lastError = "CloudKit 启动失败: \(error.localizedDescription)"
+        }
+    }
+
+    func stop() {
+        logger.info("Stopping CloudKit Relay Service")
+        pollingTask?.cancel()
+        pollingTask = nil
+        syncEngine = nil
+        relayClient = nil
+        isRunning = false
+    }
+
+    // MARK: - Polling fallback
+
+    private func startPolling() {
+        pollingTask?.cancel()
+        pollingTask = Task { [weak self] in
+            var cronElapsedSeconds = 0
+            var sessionHistoryElapsedSeconds = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { break }
+                guard let self else { continue }
+
+                await self.pollForPendingMessages()
+
+                cronElapsedSeconds += 3
+                sessionHistoryElapsedSeconds += 3
+                if cronElapsedSeconds >= 10 {
+                    cronElapsedSeconds = 0
+                    await self.pollCronRuns()
+                }
+                if sessionHistoryElapsedSeconds >= 15 {
+                    sessionHistoryElapsedSeconds = 0
+                    await self.pollGatewaySessionHistory()
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var pollDiagCounter = 0
+    @ObservationIgnored private var hasCompletedInitialFullFetch = false
+    @ObservationIgnored private var directFetchChangeToken: CKServerChangeToken?
+
+    /// Poll for pending messages using direct CKFetchRecordZoneChangesOperation with persisted change token.
+    /// First poll (nil token) does a full fetch; subsequent polls are incremental.
+    private func pollForPendingMessages() async {
+        guard isRunning else { return }
+
+        pollDiagCounter += 1
+        let shouldLogDiag = (pollDiagCounter % 10 == 1) // Log every ~30s
+
+        do {
+            let records = try await fetchZoneChangesDirectly()
+            lastSyncDate = Date()
+
+            // Filter for pending toGateway messages
+            var processedCount = 0
+            for (message, record) in records {
+                if message.direction == .toGateway && message.status == .pending {
+                    await processIncomingMessage(message, record: record)
+                    processedCount += 1
+                }
+            }
+
+            if shouldLogDiag {
+                NSLog("[CloudKitRelay] Poll diag #%d: directFetch got %d records, %d pending toGateway, zone=%@",
+                      pollDiagCounter, records.count, processedCount, CloudKitConstants.zoneID.zoneName)
+            }
+        } catch {
+            NSLog("[CloudKitRelay] ❌ fetchZoneChangesDirectly error: %@", error.localizedDescription)
+            logger.error("fetchZoneChangesDirectly error: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Direct zone changes fetch
+
+    /// Fetch zone changes using CKFetchRecordZoneChangesOperation with persisted change token.
+    /// Returns all MessageRecords found (caller filters by direction/status).
+    private func fetchZoneChangesDirectly() async throws -> [(MessageRecord, CKRecord)] {
+        try await withCheckedThrowingContinuation { continuation in
+            let zoneID = CloudKitConstants.zoneID
+            let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration(
+                previousServerChangeToken: directFetchChangeToken
+            )
+
+            let operation = CKFetchRecordZoneChangesOperation(
+                recordZoneIDs: [zoneID],
+                configurationsByRecordZoneID: [zoneID: config]
+            )
+
+            var results: [(MessageRecord, CKRecord)] = []
+
+            operation.recordWasChangedBlock = { _, result in
+                switch result {
+                case .success(let record):
+                    guard record.recordType == MessageRecord.recordType else { return }
+                    if let msg = MessageRecord.from(record: record) {
+                        results.append((msg, record))
+                    }
+                case .failure(let error):
+                    NSLog("[CloudKitRelay] directFetch recordWasChanged error: %@", error.localizedDescription)
+                }
+            }
+
+            operation.recordZoneChangeTokensUpdatedBlock = { [weak self] _, token, _ in
+                if let token {
+                    Task { @MainActor in
+                        self?.directFetchChangeToken = token
+                        Self.saveDirectFetchToken(token)
+                    }
+                }
+            }
+
+            operation.recordZoneFetchCompletionBlock = { [weak self] _, token, _, _, error in
+                if let error {
+                    if (error as? CKError)?.code == .changeTokenExpired {
+                        Task { @MainActor in
+                            self?.directFetchChangeToken = nil
+                            Self.saveDirectFetchToken(nil)
+                            NSLog("[CloudKitRelay] Change token expired, will do full fetch next poll")
+                        }
+                    }
+                } else if let token {
+                    Task { @MainActor in
+                        self?.directFetchChangeToken = token
+                        Self.saveDirectFetchToken(token)
+                    }
+                }
+            }
+
+            operation.fetchRecordZoneChangesCompletionBlock = { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: results)
+                }
+            }
+
+            operation.qualityOfService = .userInitiated
+            self.database.add(operation)
+        }
+    }
+
+    private static func saveDirectFetchToken(_ token: CKServerChangeToken?) {
+        guard let token else {
+            UserDefaults.standard.removeObject(forKey: directFetchTokenKey)
+            return
+        }
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
+            UserDefaults.standard.set(data, forKey: directFetchTokenKey)
+        } catch {
+            NSLog("[CloudKitRelay] Failed to save direct fetch token: %@", error.localizedDescription)
+        }
+    }
+
+    /// Fetch all records from the zone using CKFetchRecordZoneChangesOperation with nil token
+    /// (full fetch), then filter for pending toGateway messages in memory.
+    private func fetchPendingMessagesDirectly() async throws -> [(MessageRecord, CKRecord)] {
+        try await withCheckedThrowingContinuation { continuation in
+            let zoneID = CloudKitConstants.zoneID
+            let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration(
+                previousServerChangeToken: nil  // nil = full fetch from beginning
+            )
+
+            let operation = CKFetchRecordZoneChangesOperation(
+                recordZoneIDs: [zoneID],
+                configurationsByRecordZoneID: [zoneID: config]
+            )
+
+            var results: [(MessageRecord, CKRecord)] = []
+            var totalRecordCount = 0
+
+            operation.recordWasChangedBlock = { _, result in
+                switch result {
+                case .success(let record):
+                    totalRecordCount += 1
+                    guard record.recordType == MessageRecord.recordType else { return }
+                    guard let message = MessageRecord.from(record: record) else { return }
+                    if message.direction == .toGateway && message.status == .pending {
+                        NSLog("[CloudKitRelay] Direct fetch found pending: id=%@ session=%@",
+                              message.id, message.sessionKey)
+                        results.append((message, record))
+                    }
+                case .failure(let error):
+                    NSLog("[CloudKitRelay] directFetch recordWasChanged error: %@", error.localizedDescription)
+                }
+            }
+
+            operation.fetchRecordZoneChangesCompletionBlock = { error in
+                NSLog("[CloudKitRelay] Direct fetch parsed: %d total, %d pending toGateway", totalRecordCount, results.count)
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: results)
+                }
+            }
+
+            operation.qualityOfService = .userInitiated
+            database.add(operation)
+        }
+    }
+
+    private func pollCronRuns() async {
+        guard isRunning, let relayClient else { return }
+
+        do {
+            let jobs = try await relayClient.fetchCronJobs()
+            let nowMs = Date().timeIntervalSince1970 * 1000
+            let minRunAtMs = isCronInitialBackfill ? (nowMs - 3600 * 1000) : 0
+            var hasNewSyncedIDs = false
+
+            for job in jobs where job.enabled {
+                let runs = try await relayClient.fetchCronRuns(jobId: job.id)
+                for run in runs where run.status == "ok" {
+                    guard run.runAtMs >= minRunAtMs else { continue }
+                    guard let summary = run.summary?.trimmingCharacters(in: .whitespacesAndNewlines) else { continue }
+                    guard !shouldSkipGatewayAssistantMessage(summary) else { continue }
+                    guard !(job.delivery?.mode == "none" && !hasSubstantialContent(summary)) else { continue }
+
+                    let runID = buildCronRunID(jobID: job.id, run: run)
+                    guard !syncedCronRunIDs.contains(runID) else { continue }
+
+                    try await writeCronRunMessageToCloudKit(job: job, run: run, summary: summary)
+                    syncedCronRunIDs.insert(runID)
+                    hasNewSyncedIDs = true
+                }
+            }
+
+            if isCronInitialBackfill {
+                isCronInitialBackfill = false
+            }
+
+            if syncedCronRunIDs.count > 2000 {
+                syncedCronRunIDs = Set(syncedCronRunIDs.suffix(2000))
+                hasNewSyncedIDs = true
+            }
+            if hasNewSyncedIDs {
+                saveSyncedCronRunIDs(syncedCronRunIDs)
+            }
+        } catch {
+            logger.error("Cron runs poll failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func pollGatewaySessionHistory() async {
+        guard isRunning, let relayClient else { return }
+
+        for sessionKey in Self.monitoredMainSessions {
+            do {
+                let messages = try await relayClient.fetchSessionHistory(sessionKey: sessionKey, limit: 80)
+                guard !messages.isEmpty else { continue }
+
+                let lastSyncedMs = sessionHistoryLastSyncedMs[sessionKey] ?? 0
+                var sessionSyncedIDs = syncedGatewayMessageIDs[sessionKey] ?? []
+                var maxTimestamp = lastSyncedMs
+
+                for message in messages where message.role == "assistant" {
+                    maxTimestamp = max(maxTimestamp, message.timestampMs)
+                    guard message.timestampMs > lastSyncedMs else { continue }
+                    guard !sessionSyncedIDs.contains(message.id) else { continue }
+                    guard !shouldSkipGatewayAssistantMessage(message.content) else {
+                        sessionSyncedIDs.insert(message.id)
+                        continue
+                    }
+
+                    try await writeGatewayHistoryMessageToCloudKit(
+                        sessionKey: sessionKey,
+                        content: message.content,
+                        sourceMessageID: message.id,
+                        timestampMs: message.timestampMs
+                    )
+
+                    sessionSyncedIDs.insert(message.id)
+                }
+
+                sessionHistoryLastSyncedMs[sessionKey] = maxTimestamp
+                if sessionSyncedIDs.count > 200 {
+                    sessionSyncedIDs = Set(sessionSyncedIDs.suffix(200))
+                }
+                syncedGatewayMessageIDs[sessionKey] = sessionSyncedIDs
+            } catch {
+                logger.error("Session history poll failed for \(sessionKey): \(error.localizedDescription)")
+            }
+        }
+
+        saveSessionHistoryCursors(sessionHistoryLastSyncedMs)
+        saveSessionSyncedMessageIDs(syncedGatewayMessageIDs)
+    }
+
+    private func writeGatewayHistoryMessageToCloudKit(
+        sessionKey: String,
+        content: String,
+        sourceMessageID: String,
+        timestampMs: Double
+    ) async throws {
+        let metadataDict: [String: String] = [
+            "source": "gateway-session-history",
+            "sessionMessageId": sourceMessageID,
+        ]
+        let metadataData = try JSONSerialization.data(withJSONObject: metadataDict)
+        let metadata = String(data: metadataData, encoding: .utf8) ?? "{}"
+
+        let timestamp = timestampMs > 0
+            ? Date(timeIntervalSince1970: timestampMs / 1000)
+            : Date()
+
+        let responseMessage = MessageRecord(
+            id: UUID().uuidString,
+            sessionKey: sessionKey,
+            direction: .fromGateway,
+            content: content,
+            status: .pending,
+            timestamp: timestamp,
+            metadata: metadata
+        )
+        try await database.save(responseMessage.toCKRecord())
+    }
+
+    private func buildCronRunID(jobID: String, run: GatewayRelayClient.CronRun) -> String {
+        if let sessionId = run.sessionId, !sessionId.isEmpty {
+            return "\(jobID):\(sessionId)"
+        }
+        return "\(jobID):\(run.runAtMs):\(run.durationMs ?? 0)"
+    }
+
+    private func hasSubstantialContent(_ content: String) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count >= 2
+    }
+
+    private func writeCronRunMessageToCloudKit(
+        job: GatewayRelayClient.CronJob,
+        run: GatewayRelayClient.CronRun,
+        summary: String
+    ) async throws {
+        let metadataDict: [String: String] = [
+            "source": "cron",
+            "jobName": job.name,
+            "jobId": job.id,
+        ]
+        let metadataData = try JSONSerialization.data(withJSONObject: metadataDict)
+        let metadata = String(data: metadataData, encoding: .utf8) ?? "{}"
+
+        let sessionKey = "agent:\(job.agentId):main"
+        let timestamp = Date(timeIntervalSince1970: run.runAtMs / 1000)
+
+        let responseMessage = MessageRecord(
+            id: UUID().uuidString,
+            sessionKey: sessionKey,
+            direction: .fromGateway,
+            content: summary,
+            status: .pending,
+            timestamp: timestamp,
+            metadata: metadata
+        )
+        try await database.save(responseMessage.toCKRecord())
+    }
+
+    private func shouldSkipGatewayAssistantMessage(_ content: String) -> Bool {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        if trimmed == "NO_REPLY" { return true }
+        if trimmed == "HEARTBEAT_OK" { return true }
+        if trimmed.contains("ANNOUNCE_SKIP") { return true }
+        return false
+    }
+
+    // MARK: - Message processing
+
+    func processIncomingMessage(_ message: MessageRecord, record: CKRecord) async {
+        guard !processingMessageIDs.contains(message.id) else { return }
+        guard message.direction == .toGateway, message.status == .pending else { return }
+
+        processingMessageIDs.insert(message.id)
+        defer { processingMessageIDs.remove(message.id) }
+
+        let clientMessageId = extractClientMessageID(from: message)
+        if let clientMessageId, processedClientMessageIDs.contains(clientMessageId) {
+            do {
+                let latestRecord = try await database.record(for: record.recordID)
+                latestRecord["status"] = MessageStatus.delivered.rawValue as CKRecordValue
+                try await database.save(latestRecord)
+                logger.info("Skip duplicate relay for clientMessageId=\(clientMessageId)")
+            } catch {
+                logger.warning("Failed to ack duplicate message \(message.id) (non-critical): \(error.localizedDescription)")
+            }
+            return
+        }
+
+        NSLog("[CloudKitRelay] processIncomingMessage: id=%@ session=%@", message.id, message.sessionKey)
+
+        guard let relayClient else {
+            logger.error("Relay client not configured")
+            return
+        }
+
+        // Save image to local file and append path to message text (Gateway drops image_url content parts)
+        let fm = FileManager.default
+        let mediaDir = fm.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/media/inbound")
+        try? fm.createDirectory(at: mediaDir, withIntermediateDirectories: true)
+
+        var imageLocalPath: String?
+
+        // Check for CKAsset image — first try from MessageRecord, then directly from CKRecord
+        let effectiveAsset = message.imageAsset ?? (record["imageAsset"] as? CKAsset)
+        NSLog("[CloudKitRelay] Checking CKAsset: imageAsset=%@", effectiveAsset.map { String(describing: $0) } ?? "nil")
+        if let asset = effectiveAsset {
+            NSLog("[CloudKitRelay] CKAsset fileURL=%@", asset.fileURL?.absoluteString ?? "nil")
+            if let fileURL = asset.fileURL {
+                let exists = fm.fileExists(atPath: fileURL.path)
+                let size: Int64 = (try? fm.attributesOfItem(atPath: fileURL.path)[.size] as? Int64) ?? -1
+                NSLog("[CloudKitRelay] CKAsset file exists=%d, size=%lld", exists ? 1 : 0, size)
+                if let imageData = try? Data(contentsOf: fileURL) {
+                    NSLog("[CloudKitRelay] ✅ Image extracted: %d bytes", imageData.count)
+                    let savedName = UUID().uuidString + ".jpg"
+                    let savedURL = mediaDir.appendingPathComponent(savedName)
+                    try? imageData.write(to: savedURL)
+                    imageLocalPath = savedURL.path
+                } else {
+                    NSLog("[CloudKitRelay] ❌ Failed to extract image from CKAsset")
+                }
+            } else {
+                NSLog("[CloudKitRelay] ❌ Failed to extract image from CKAsset — fileURL is nil, will re-fetch record")
+                // CKAsset fileURL is nil — re-fetch the full record to download the asset
+                do {
+                    let fullRecord = try await database.record(for: record.recordID)
+                    if let refetchedAsset = fullRecord["imageAsset"] as? CKAsset,
+                       let refetchedURL = refetchedAsset.fileURL,
+                       let imageData = try? Data(contentsOf: refetchedURL) {
+                        NSLog("[CloudKitRelay] ✅ Image extracted after re-fetch: %d bytes", imageData.count)
+                        let savedName = UUID().uuidString + ".jpg"
+                        let savedURL = mediaDir.appendingPathComponent(savedName)
+                        try? imageData.write(to: savedURL)
+                        imageLocalPath = savedURL.path
+                    } else {
+                        NSLog("[CloudKitRelay] ❌ Failed to extract image even after re-fetch")
+                    }
+                } catch {
+                    NSLog("[CloudKitRelay] ❌ Re-fetch record failed: %@", error.localizedDescription)
+                }
+            }
+        }
+
+        // Fallback: legacy base64 in metadata — save to file instead of data URL
+        if imageLocalPath == nil,
+           let metaData = message.metadata.data(using: .utf8),
+           let metaJson = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any],
+           let atts = metaJson["attachments"] as? [[String: String]], !atts.isEmpty,
+           let firstAtt = atts.first,
+           firstAtt["type"] == "image_url",
+           let dataURL = firstAtt["url"], dataURL.hasPrefix("data:"),
+           let commaIndex = dataURL.firstIndex(of: ",") {
+            let base64String = String(dataURL[dataURL.index(after: commaIndex)...])
+            if let data = Data(base64Encoded: base64String) {
+                let savedName = UUID().uuidString + ".jpg"
+                let savedURL = mediaDir.appendingPathComponent(savedName)
+                try? data.write(to: savedURL)
+                imageLocalPath = savedURL.path
+            }
+        }
+
+        do {
+            var messageText = message.content
+            if let path = imageLocalPath {
+                messageText = messageText.isEmpty ? path : messageText + "\n" + path
+            }
+            let contentPreview = String(messageText.prefix(50))
+            NSLog("[CloudKitRelay] Sending to Gateway: session=%@ content=%@", message.sessionKey, contentPreview)
+            let response: String
+            NSLog("[CloudKitRelay] 📝 Sending text%@", imageLocalPath != nil ? " (with image path)" : " only (no attachments)")
+            response = try await relayClient.sendMessage(
+                sessionKey: message.sessionKey,
+                message: messageText
+            )
+            NSLog("[CloudKitRelay] Gateway responded: %d chars", response.count)
+
+            // 1. Write response FIRST as a new record (independent of ACK)
+            let responseMessage = MessageRecord(
+                id: UUID().uuidString,
+                sessionKey: message.sessionKey,
+                direction: .fromGateway,
+                content: response,
+                status: .pending,
+                timestamp: Date(),
+                metadata: message.metadata
+            )
+            NSLog("[CloudKitRelay] Writing response to CloudKit: id=%@", responseMessage.id)
+            try await database.save(responseMessage.toCKRecord())
+            NSLog("[CloudKitRelay] ✅ Response saved to CloudKit")
+
+            // Advance session history cursor to avoid re-importing this response
+            let nowMs = Date().timeIntervalSince1970 * 1000
+            sessionHistoryLastSyncedMs[message.sessionKey] = max(sessionHistoryLastSyncedMs[message.sessionKey] ?? 0, nowMs)
+            saveSessionHistoryCursors(sessionHistoryLastSyncedMs)
+
+            if let clientMessageId {
+                processedClientMessageIDs.insert(clientMessageId)
+                if processedClientMessageIDs.count > 2000 {
+                    processedClientMessageIDs = Set(processedClientMessageIDs.suffix(2000))
+                }
+                saveProcessedClientMessageIDs(processedClientMessageIDs)
+            }
+
+            // 2. ACK original message (best effort — re-fetch to avoid oplock conflict)
+            do {
+                let latestRecord = try await database.record(for: record.recordID)
+                latestRecord["status"] = MessageStatus.delivered.rawValue as CKRecordValue
+                try await database.save(latestRecord)
+                NSLog("[CloudKitRelay] ✅ ACK succeeded for %@", message.id)
+            } catch {
+                NSLog("[CloudKitRelay] ⚠️ ACK failed for %@ (best effort, response already saved): %@", message.id, error.localizedDescription)
+                logger.warning("ACK failed for \(message.id): \(error.localizedDescription)")
+            }
+
+            logger.info("Relayed message \(message.id), response written")
+        } catch {
+            NSLog("[CloudKitRelay] Relay failed for %@: %@", message.id, error.localizedDescription)
+            logger.error("Failed to relay message \(message.id): \(error.localizedDescription)")
+            lastError = error.localizedDescription
+        }
+    }
+
+    // MARK: - CKSyncEngine handling
+
+    func handleSyncEvent(_ event: CKSyncEngine.Event) {
+        switch event {
+        case .stateUpdate(let stateUpdate):
+            saveSyncState(stateUpdate.stateSerialization)
+
+        case .accountChange(let accountChange):
+            handleAccountChange(accountChange)
+
+        case .fetchedDatabaseChanges(let fetchedChanges):
+            handleFetchedDatabaseChanges(fetchedChanges)
+
+        case .fetchedRecordZoneChanges(let fetchedChanges):
+            handleFetchedRecordZoneChanges(fetchedChanges)
+
+        case .sentRecordZoneChanges(let sentChanges):
+            handleSentRecordZoneChanges(sentChanges)
+
+        case .willFetchChanges, .willFetchRecordZoneChanges, .didFetchChanges,
+             .didFetchRecordZoneChanges, .willSendChanges, .didSendChanges,
+             .sentDatabaseChanges:
+            break
+
+        @unknown default:
+            logger.warning("Unknown sync engine event")
+        }
+    }
+
+    func nextRecordZoneChangeBatch(
+        _ context: CKSyncEngine.SendChangesContext
+    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+        let pendingChanges = syncEngine?.state.pendingRecordZoneChanges ?? []
+        let scope = context.options.scope
+
+        let filteredChanges: [CKSyncEngine.PendingRecordZoneChange]
+        switch scope {
+        case .zoneIDs(let zoneIDs):
+            filteredChanges = pendingChanges.filter { change in
+                let zoneID: CKRecordZone.ID
+                switch change {
+                case .saveRecord(let id):
+                    zoneID = id.zoneID
+                case .deleteRecord(let id):
+                    zoneID = id.zoneID
+                @unknown default:
+                    return false
+                }
+                return zoneIDs.contains(zoneID)
+            }
+        default:
+            filteredChanges = Array(pendingChanges)
+        }
+
+        return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: filteredChanges) { _ in
+            return nil
+        }
+    }
+
+    // MARK: - Sync event handlers
+
+    private func handleAccountChange(_ change: CKSyncEngine.Event.AccountChange) {
+        switch change.changeType {
+        case .signIn, .switchAccounts:
+            logger.info("iCloud account changed, restarting sync")
+        case .signOut:
+            logger.warning("iCloud account signed out")
+            lastError = "iCloud 账号已登出"
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleFetchedDatabaseChanges(
+        _ changes: CKSyncEngine.Event.FetchedDatabaseChanges
+    ) {
+        for modification in changes.modifications {
+            logger.debug("Zone modified: \(modification.zoneID.zoneName)")
+        }
+    }
+
+    private func handleFetchedRecordZoneChanges(
+        _ changes: CKSyncEngine.Event.FetchedRecordZoneChanges
+    ) {
+        var pendingCount = 0
+        var skippedCount = 0
+
+        for modification in changes.modifications {
+            let record = modification.record
+            guard record.recordType == MessageRecord.recordType else { continue }
+            guard let message = MessageRecord.from(record: record) else { continue }
+
+            if message.direction == .toGateway && message.status == .pending {
+                pendingCount += 1
+                NSLog("[CloudKitRelay] ✅ Found pending toGateway message via sync: %@", message.id)
+                Task {
+                    await processIncomingMessage(message, record: record)
+                }
+            } else {
+                skippedCount += 1
+            }
+        }
+
+        if changes.modifications.count > 0 || changes.deletions.count > 0 {
+            NSLog("[CloudKitRelay] fetchedRecordZoneChanges: %d modifications (%d pending, %d skipped), %d deletions",
+                  changes.modifications.count, pendingCount, skippedCount, changes.deletions.count)
+        }
+        lastSyncDate = Date()
+    }
+
+    private func handleSentRecordZoneChanges(
+        _ changes: CKSyncEngine.Event.SentRecordZoneChanges
+    ) {
+        for savedRecord in changes.savedRecords {
+            logger.debug("Record saved to CloudKit: \(savedRecord.recordID.recordName)")
+        }
+        for failedSave in changes.failedRecordSaves {
+            logger.error("Failed to save record: \(failedSave.record.recordID.recordName), error: \(failedSave.error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Zone creation
+
+    func ensureZoneExists() async {
+        let zone = CKRecordZone(zoneID: CloudKitConstants.zoneID)
+        do {
+            try await database.save(zone)
+            NSLog("[CloudKitRelay] ClawTowerZone created or confirmed")
+            logger.info("ClawTowerZone created or confirmed")
+        } catch {
+            NSLog("[CloudKitRelay] Zone creation result: %@", error.localizedDescription)
+            logger.debug("Zone creation result: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - State persistence
+
+    private func saveSyncState(_ state: CKSyncEngine.State.Serialization) {
+        lastSyncEngineState = state
+        do {
+            let data = try JSONEncoder().encode(state)
+            UserDefaults.standard.set(data, forKey: Self.stateKey)
+        } catch {
+            logger.error("Failed to save sync state: \(error.localizedDescription)")
+        }
+    }
+
+    private func loadSyncState() -> CKSyncEngine.State.Serialization? {
+        guard let data = UserDefaults.standard.data(forKey: Self.stateKey) else { return nil }
+        do {
+            return try JSONDecoder().decode(CKSyncEngine.State.Serialization.self, from: data)
+        } catch {
+            logger.error("Failed to load sync state: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    private func saveSyncedCronRunIDs(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids), forKey: Self.cronRunSyncedIDsKey)
+    }
+
+    private func loadSyncedCronRunIDs() -> Set<String> {
+        let raw = UserDefaults.standard.array(forKey: Self.cronRunSyncedIDsKey) as? [String] ?? []
+        return Set(raw)
+    }
+
+    private func extractClientMessageID(from message: MessageRecord) -> String? {
+        guard let data = message.metadata.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let clientMessageID = json["clientMessageId"] as? String,
+              !clientMessageID.isEmpty else {
+            return nil
+        }
+        return clientMessageID
+    }
+
+    private func saveProcessedClientMessageIDs(_ ids: Set<String>) {
+        UserDefaults.standard.set(Array(ids), forKey: Self.processedClientMessageIDsKey)
+    }
+
+    private func loadProcessedClientMessageIDs() -> Set<String> {
+        let raw = UserDefaults.standard.array(forKey: Self.processedClientMessageIDsKey) as? [String] ?? []
+        return Set(raw)
+    }
+
+    private func saveSessionHistoryCursors(_ cursors: [String: Double]) {
+        UserDefaults.standard.set(cursors, forKey: Self.sessionCursorKey)
+    }
+
+    private func loadSessionHistoryCursors() -> [String: Double] {
+        UserDefaults.standard.dictionary(forKey: Self.sessionCursorKey) as? [String: Double] ?? [:]
+    }
+
+    private func saveSessionSyncedMessageIDs(_ idsBySession: [String: Set<String>]) {
+        let serializable = idsBySession.mapValues { Array($0) }
+        UserDefaults.standard.set(serializable, forKey: Self.sessionSyncedIDsKey)
+    }
+
+    private func loadSessionSyncedMessageIDs() -> [String: Set<String>] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: Self.sessionSyncedIDsKey) as? [String: [String]] else {
+            return [:]
+        }
+        return raw.mapValues(Set.init)
+    }
+}
+
+// MARK: - CKSyncEngineDelegate
+
+private final class SyncEngineDelegate: CKSyncEngineDelegate {
+    private let service: CloudKitRelayService
+
+    init(service: CloudKitRelayService) {
+        self.service = service
+    }
+
+    func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) {
+        Task { @MainActor in
+            service.handleSyncEvent(event)
+        }
+    }
+
+    func nextRecordZoneChangeBatch(
+        _ context: CKSyncEngine.SendChangesContext,
+        syncEngine: CKSyncEngine
+    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+        await service.nextRecordZoneChangeBatch(context)
+    }
+}

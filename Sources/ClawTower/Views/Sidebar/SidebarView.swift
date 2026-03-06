@@ -4,16 +4,29 @@ struct SidebarView: View {
     @Bindable var appState: AppState
     @Binding var selectedNavigation: NavigationItem?
 
+    @State private var showCreateSheet = false
+    @State private var editingAgent: Agent?
+    @State private var pendingDeleteAgent: Agent?
+    @State private var agentSessions: [String: [Session]] = [:]
+    @State private var expandedAgents: Set<String> = []
+    @State private var activeAgentIDs: Set<String> = []
+    @State private var activeSubagents: [String: [Session]] = [:]
+    @State private var previousSubagentKeys: Set<String> = []
+    @State private var initialLoadDone = false
+    @State private var readTimestamps: [String: Double] = {
+        UserDefaults.standard.dictionary(forKey: "SidebarReadTimestamps") as? [String: Double] ?? [:]
+    }()
+
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $selectedNavigation) {
                 Section("导航") {
-                    NavigationLink(value: NavigationItem.dashboard) {
-                        Label("Dashboard", systemImage: "square.grid.2x2")
-                    }
-
                     NavigationLink(value: NavigationItem.secondBrain) {
                         Label("第二大脑", systemImage: "books.vertical")
+                    }
+
+                    NavigationLink(value: NavigationItem.tasks) {
+                        Label("任务", systemImage: "checklist")
                     }
 
                     NavigationLink(value: NavigationItem.projects) {
@@ -29,31 +42,31 @@ struct SidebarView: View {
                     }
                 }
 
-                Section("Agents") {
+                Section {
                     if appState.agents.isEmpty {
                         Text("连接 Gateway 后显示")
                             .foregroundStyle(.secondary)
                             .font(.caption)
                     } else {
                         ForEach(appState.agents) { agent in
-                            NavigationLink(value: NavigationItem.chat(agentId: agent.id)) {
-                                HStack {
-                                    Text(agent.emoji)
-                                    Text(agent.displayName)
-                                        .lineLimit(1)
-                                    Spacer()
-                                    Circle()
-                                        .fill(agent.status == .online ? .green : .gray)
-                                        .frame(width: 8, height: 8)
-                                }
-                            }
+                            agentRow(agent)
                         }
+                    }
+                } header: {
+                    HStack {
+                        Text("Agents")
+                        Spacer()
+                        Button {
+                            showCreateSheet = true
+                        } label: {
+                            Image(systemName: "plus")
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
             .listStyle(.sidebar)
 
-            // Bottom bar
             Divider()
             HStack {
                 Button {
@@ -81,9 +94,277 @@ struct SidebarView: View {
         .task {
             await appState.loadAgents()
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(10))
+                await loadSessions()
+                try? await Task.sleep(for: .seconds(5))
                 await appState.loadAgents()
             }
         }
+        .onChange(of: appState.subagentRefreshTrigger) { _, _ in
+            Task { await loadSessions() }
+        }
+        .onChange(of: selectedNavigation) { _, newValue in
+            if case let .chat(agentId) = newValue {
+                appState.selectedAgent = appState.agents.first(where: { $0.id == agentId })
+                appState.markAgentAsRead(agentId)
+            } else if case let .chatSession(_, sessionKey, _) = newValue {
+                markSessionRead(sessionKey)
+            }
+        }
+        .sheet(isPresented: $showCreateSheet) {
+            AgentFormSheet(isEditing: false) { name, emoji, description, model in
+                Task {
+                    let draft = AgentDraft(name: name, emoji: emoji, roleDescription: description, model: model)
+                    do {
+                        let agentId = try await appState.gatewayClient.createAgent(draft)
+                        await appState.loadAgents()
+                    } catch {
+                        print("[ClawTower] createAgent failed: \(error)")
+                        await appState.loadAgents()
+                    }
+                }
+            }
+        }
+        .sheet(item: $editingAgent) { agent in
+            AgentFormSheet(
+                name: agent.displayName,
+                emoji: agent.emoji,
+                description: agent.roleDescription ?? "",
+                model: agent.model ?? "default",
+                isEditing: true
+            ) { name, emoji, description, model in
+                Task {
+                    let draft = AgentDraft(name: name, emoji: emoji, roleDescription: description, model: model)
+                    try? await appState.gatewayClient.updateAgent(id: agent.id, draft: draft)
+                    await appState.loadAgents()
+                }
+            }
+        }
+        .alert("确认删除 Agent", isPresented: Binding(
+            get: { pendingDeleteAgent != nil },
+            set: { if !$0 { pendingDeleteAgent = nil } }
+        )) {
+            Button("取消", role: .cancel) {
+                pendingDeleteAgent = nil
+            }
+            Button("删除", role: .destructive) {
+                guard let agent = pendingDeleteAgent else { return }
+                Task {
+                    try? await appState.gatewayClient.deleteAgent(id: agent.id)
+                    pendingDeleteAgent = nil
+                    await appState.loadAgents()
+                }
+            }
+        } message: {
+            Text("删除后不可恢复：\(pendingDeleteAgent?.displayName ?? "")")
+        }
+    }
+
+    // MARK: - Agent Row with DisclosureGroup
+
+    @ViewBuilder
+    private func agentRow(_ agent: Agent) -> some View {
+        let sessions = agentSessions[agent.id] ?? []
+        
+        NavigationLink(value: NavigationItem.chat(agentId: agent.id)) {
+            HStack {
+                if !sessions.isEmpty {
+                    Image(systemName: expandedAgents.contains(agent.id) ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 28)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            withAnimation {
+                                if expandedAgents.contains(agent.id) {
+                                    expandedAgents.remove(agent.id)
+                                } else {
+                                    expandedAgents.insert(agent.id)
+                                }
+                            }
+                        }
+                } else {
+                    Spacer().frame(width: 20)
+                }
+                agentLabel(agent)
+            }
+        }
+        .contextMenu { agentContextMenu(agent) }
+
+        // 显示活跃的 sub-agent 任务
+        if let activeSubs = activeSubagents[agent.id] {
+            ForEach(activeSubs) { session in
+                HStack(spacing: 4) {
+                    Text(activeSubagentLabel(session))
+                        .font(.caption)
+                        .lineLimit(1)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("工作中…")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                .padding(.leading, 28)
+                .padding(.vertical, 2)
+            }
+        }
+
+        if expandedAgents.contains(agent.id), !sessions.isEmpty {
+            ForEach(sessions) { session in
+                let label = sessionLabel(session)
+                NavigationLink(value: NavigationItem.chatSession(agentId: agent.id, sessionKey: session.key, label: label)) {
+                    HStack {
+                        Image(systemName: session.isCronSession ? "clock.arrow.circlepath" : "person.2")
+                            .foregroundStyle(.secondary)
+                        Text(label)
+                            .lineLimit(1)
+                        Spacer()
+                        if isSessionUnread(session) {
+                            Circle()
+                                .fill(.red)
+                                .frame(width: 8, height: 8)
+                        }
+                    }
+                }
+                .padding(.leading, 20)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func agentLabel(_ agent: Agent) -> some View {
+        HStack {
+            Text(agent.emoji)
+            Text(agent.displayName)
+                .lineLimit(1)
+            Spacer()
+            if appState.unreadAgentIDs.contains(agent.id) {
+                Text("新消息")
+                    .font(.caption2)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(.red))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func agentContextMenu(_ agent: Agent) -> some View {
+        Button("编辑") {
+            editingAgent = agent
+        }
+        Divider()
+        Button("删除", role: .destructive) {
+            pendingDeleteAgent = agent
+        }
+    }
+
+    private func activeSubagentLabel(_ session: Session) -> String {
+        if let label = session.label, !label.isEmpty {
+            // label 格式已经是 "角色: 任务标题"
+            let short = label.prefix(35)
+            return short.count < label.count ? "\(short)…" : label
+        }
+        // 回退：从 key 提取 agentId
+        let parts = session.key.split(separator: ":")
+        let sourceAgent = parts.count >= 2 ? String(parts[1]) : "agent"
+        return "\(sourceAgent): 子任务"
+    }
+
+    private func isAgentWorking(_ agent: Agent) -> Bool {
+        return activeAgentIDs.contains(agent.id)
+    }
+
+    // MARK: - Sessions
+
+    private func loadSessions() async {
+        guard let sessions = try? await appState.gatewayClient.listSessions(limit: 100) else { return }
+        var grouped: [String: [Session]] = [:]
+        for session in sessions {
+            let isCron = session.key.contains(":cron:")
+            let isSubagent = session.key.contains(":subagent:") && session.label != nil
+            guard isCron || isSubagent else { continue }
+            // Extract agentId from key pattern "agent:<agentId>:..."
+            let parts = session.key.split(separator: ":")
+            guard parts.count >= 2 else { continue }
+            let agentId = String(parts[1])
+            grouped[agentId, default: []].append(session)
+        }
+        // Sort each group by updatedAt descending
+        for key in grouped.keys {
+            grouped[key]?.sort { ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast) }
+        }
+        agentSessions = grouped
+
+        // 收集所有 subagent sessions
+        var allSubagentSessions: [String: [Session]] = [:]
+        var currentSubagentKeys = Set<String>()
+        for session in sessions {
+            guard session.key.contains(":subagent:") else { continue }
+            let parts = session.key.split(separator: ":")
+            guard parts.count >= 2 else { continue }
+            let agentId = String(parts[1])
+            currentSubagentKeys.insert(session.key)
+            allSubagentSessions[agentId, default: []].append(session)
+        }
+
+        // 首次加载：记录现有 session keys，不跟踪任何
+        if !initialLoadDone {
+            previousSubagentKeys = currentSubagentKeys
+            initialLoadDone = true
+        } else {
+            // 只跟踪新出现的 session（上次 poll 没有的）
+            let newKeys = currentSubagentKeys.subtracting(previousSubagentKeys)
+            for key in newKeys {
+                appState.addTrackedSubagent(key)
+            }
+            previousSubagentKeys = currentSubagentKeys
+        }
+
+        // 已不在 session 列表中的 key 移除跟踪
+        let staleKeys = appState.trackedSubagentKeys.subtracting(currentSubagentKeys)
+        appState.removeTrackedSubagents(staleKeys)
+
+        // 只显示被跟踪的 subagent sessions
+        var activeSubs: [String: [Session]] = [:]
+        for (agentId, agentSessions) in allSubagentSessions {
+            let tracked = agentSessions.filter { appState.trackedSubagentKeys.contains($0.key) }
+            if !tracked.isEmpty {
+                activeSubs[agentId] = tracked
+            }
+        }
+        activeSubagents = activeSubs
+
+        // active agent IDs 基于跟踪的 subagents
+        var active = Set<String>()
+        for (agentId, subs) in activeSubs {
+            if !subs.isEmpty { active.insert(agentId) }
+        }
+        activeAgentIDs = active
+    }
+
+    private func sessionLabel(_ session: Session) -> String {
+        if let label = session.label ?? session.displayName {
+            var cleaned = label
+            if cleaned.hasPrefix("Cron: ") {
+                cleaned = String(cleaned.dropFirst(6))
+            }
+            return cleaned
+        }
+        if session.isCronSession {
+            return "定时任务"
+        }
+        return "子会话"
+    }
+
+    private func isSessionUnread(_ session: Session) -> Bool {
+        guard let updatedAt = session.updatedAt else { return false }
+        let lastRead = readTimestamps[session.key] ?? 0
+        return updatedAt.timeIntervalSince1970 > lastRead
+    }
+
+    private func markSessionRead(_ sessionKey: String) {
+        readTimestamps[sessionKey] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(readTimestamps, forKey: "SidebarReadTimestamps")
     }
 }

@@ -26,6 +26,12 @@ final class AuthService {
         case error(String)
     }
 
+    private struct RuntimeCommand {
+        let executable: URL
+        let arguments: [String]
+        let bundled: Bool
+    }
+
     // MARK: - State
 
     var state: AuthState = .idle
@@ -92,11 +98,11 @@ final class AuthService {
         }
     }
 
-    func authenticateOpenAIOAuth() {
+    func authenticateOpenAIOAuth(homeDir: String? = nil) {
         currentTask?.cancel()
         state = .launching
 
-        let events = Self.oauthEventStream()
+        let events = Self.oauthEventStream(homeDir: homeDir)
 
         currentTask = Task {
             for await event in events {
@@ -131,34 +137,22 @@ final class AuthService {
         }
     }
 
-    func verifyAnthropicSetupToken(token: String) {
+    func verifyAnthropicSetupToken(token: String, homeDir: String? = nil) {
         currentTask?.cancel()
         state = .verifying
 
-        let tokenCopy = token
-        let events = Self.pasteTokenEventStream(token: tokenCopy)
-
         currentTask = Task {
-            var succeeded = false
-            for await event in events {
-                guard !Task.isCancelled else { break }
-                switch event {
-                case .output(let text):
-                    let lowered = text.lowercased()
-                    if lowered.contains("success") || lowered.contains("authenticated") || lowered.contains("saved") {
-                        succeeded = true
-                    }
-                case .exited(let status):
-                    if status == 0 || succeeded {
-                        UserDefaults.standard.set(tokenCopy, forKey: "setupToken")
-                        saveKey(provider: .anthropic, apiKey: "setup-token")
-                        state = .verified
-                    } else if !succeeded {
-                        state = .error("Setup Token 验证失败，请检查后重试")
-                    }
-                case .error(let message):
-                    state = .error("启动验证失败：\(message)")
-                }
+            do {
+                let resolvedHome = homeDir ?? FileManager.default.homeDirectoryForCurrentUser.path
+                try Self.persistAnthropicSetupTokenProfile(token: token, homeDir: resolvedHome)
+
+                guard !Task.isCancelled else { return }
+                UserDefaults.standard.set(token, forKey: "setupToken")
+                saveKey(provider: .anthropic, apiKey: "setup-token")
+                state = .verified
+            } catch {
+                guard !Task.isCancelled else { return }
+                state = .error("Setup Token 保存失败：\(error.localizedDescription)")
             }
         }
     }
@@ -168,79 +162,138 @@ final class AuthService {
         state = .idle
     }
 
-    // MARK: - OpenAI OAuth Process
+    // MARK: - Runtime Resolution
 
-    nonisolated private static func oauthEventStream() -> AsyncStream<OAuthEvent> {
-        AsyncStream { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/openclaw")
-            process.arguments = ["models", "auth", "login", "--provider", "openai"]
-            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+    nonisolated private static func resolveAuthRuntimeCommand(subcommand: [String]) -> RuntimeCommand {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
+            let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
 
-            var env = ProcessInfo.processInfo.environment
-            let existingPath = env["PATH"] ?? ""
-            env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + existingPath
-            process.environment = env
-
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-
-            let readHandle = pipe.fileHandleForReading
-
-            readHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                if data.isEmpty {
-                    readHandle.readabilityHandler = nil
-                    return
-                }
-                if let str = String(data: data, encoding: .utf8) {
-                    continuation.yield(.output(str))
-                }
-            }
-
-            process.terminationHandler = { proc in
-                readHandle.readabilityHandler = nil
-                continuation.yield(.exited(proc.terminationStatus))
-                continuation.finish()
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.yield(.error(error.localizedDescription))
-                continuation.finish()
+            if FileManager.default.fileExists(atPath: bundledNode.path)
+                && FileManager.default.fileExists(atPath: bundledOpenclaw.path)
+            {
+                return RuntimeCommand(
+                    executable: bundledNode,
+                    arguments: [bundledOpenclaw.path] + subcommand,
+                    bundled: true
+                )
             }
         }
+
+        // Dev fallback: system-installed CLI
+        return RuntimeCommand(
+            executable: URL(fileURLWithPath: "/usr/local/bin/openclaw"),
+            arguments: subcommand,
+            bundled: false
+        )
     }
 
-    // MARK: - Anthropic Setup Token Process
+    nonisolated private static func baseEnvironment(homeDir: String?) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let existingPath = env["PATH"] ?? ""
+        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + existingPath
+        if let homeDir {
+            env["HOME"] = homeDir
+        }
+        env["NODE_NO_WARNINGS"] = "1"
+        return env
+    }
 
-    nonisolated private static func pasteTokenEventStream(token: String) -> AsyncStream<OAuthEvent> {
+    nonisolated private static func persistAnthropicSetupTokenProfile(token: String, homeDir: String) throws {
+        let fm = FileManager.default
+        let homeURL = URL(fileURLWithPath: homeDir, isDirectory: true)
+
+        let agentDir = homeURL
+            .appendingPathComponent(".openclaw", isDirectory: true)
+            .appendingPathComponent("agents", isDirectory: true)
+            .appendingPathComponent("main", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true)
+
+        try fm.createDirectory(at: agentDir, withIntermediateDirectories: true)
+
+        let authProfilesURL = agentDir.appendingPathComponent("auth-profiles.json")
+        var authRoot: [String: Any] = [:]
+
+        if let data = try? Data(contentsOf: authProfilesURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            authRoot = json
+        }
+
+        authRoot["version"] = 1
+        var profiles = authRoot["profiles"] as? [String: Any] ?? [:]
+        profiles["anthropic:default"] = [
+            "type": "token",
+            "provider": "anthropic",
+            "token": token
+        ]
+        authRoot["profiles"] = profiles
+
+        let authData = try JSONSerialization.data(withJSONObject: authRoot, options: [.prettyPrinted, .sortedKeys])
+        try authData.write(to: authProfilesURL, options: .atomic)
+
+        let configDir = homeURL.appendingPathComponent(".openclaw", isDirectory: true)
+        try fm.createDirectory(at: configDir, withIntermediateDirectories: true)
+
+        let openclawConfigURL = configDir.appendingPathComponent("openclaw.json")
+        var configRoot: [String: Any] = [:]
+        if let data = try? Data(contentsOf: openclawConfigURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            configRoot = json
+        }
+
+        var auth = configRoot["auth"] as? [String: Any] ?? [:]
+        var authProfiles = auth["profiles"] as? [String: Any] ?? [:]
+        authProfiles["anthropic:default"] = [
+            "provider": "anthropic",
+            "mode": "token"
+        ]
+        auth["profiles"] = authProfiles
+        configRoot["auth"] = auth
+
+        let configData = try JSONSerialization.data(withJSONObject: configRoot, options: [.prettyPrinted, .sortedKeys])
+        try configData.write(to: openclawConfigURL, options: .atomic)
+    }
+
+    // MARK: - OpenAI OAuth Process
+
+    nonisolated private static func oauthEventStream(homeDir: String? = nil) -> AsyncStream<OAuthEvent> {
         AsyncStream { continuation in
+            let command = resolveAuthRuntimeCommand(subcommand: ["models", "auth", "login", "--provider", "openai"])
+
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/openclaw")
-            process.arguments = ["models", "auth", "paste-token", "--provider", "anthropic"]
-            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+            process.executableURL = command.executable
+            process.arguments = command.arguments
 
-            var env = ProcessInfo.processInfo.environment
-            let existingPath = env["PATH"] ?? ""
-            env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:" + existingPath
-            process.environment = env
-
-            let stdinPipe = Pipe()
-            process.standardInput = stdinPipe
+            process.environment = baseEnvironment(homeDir: homeDir)
+            if let homeDir {
+                process.currentDirectoryURL = URL(fileURLWithPath: homeDir)
+            } else {
+                process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+            }
 
             let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
             process.standardOutput = stdoutPipe
-            process.standardError = Pipe()
+            process.standardError = stderrPipe
 
-            let readHandle = stdoutPipe.fileHandleForReading
+            let stdoutHandle = stdoutPipe.fileHandleForReading
+            let stderrHandle = stderrPipe.fileHandleForReading
 
-            readHandle.readabilityHandler = { handle in
+            stdoutHandle.readabilityHandler = { handle in
                 let data = handle.availableData
                 if data.isEmpty {
-                    readHandle.readabilityHandler = nil
+                    stdoutHandle.readabilityHandler = nil
+                    return
+                }
+                if let str = String(data: data, encoding: .utf8) {
+                    continuation.yield(.output(str))
+                }
+            }
+
+            stderrHandle.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    stderrHandle.readabilityHandler = nil
                     return
                 }
                 if let str = String(data: data, encoding: .utf8) {
@@ -249,18 +302,14 @@ final class AuthService {
             }
 
             process.terminationHandler = { proc in
-                readHandle.readabilityHandler = nil
+                stdoutHandle.readabilityHandler = nil
+                stderrHandle.readabilityHandler = nil
                 continuation.yield(.exited(proc.terminationStatus))
                 continuation.finish()
             }
 
             do {
                 try process.run()
-                // Write the token to stdin then close
-                if let tokenData = (token + "\n").data(using: .utf8) {
-                    stdinPipe.fileHandleForWriting.write(tokenData)
-                }
-                try stdinPipe.fileHandleForWriting.close()
             } catch {
                 continuation.yield(.error(error.localizedDescription))
                 continuation.finish()

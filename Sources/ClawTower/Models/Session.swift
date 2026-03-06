@@ -9,6 +9,7 @@ struct Session: Identifiable, Sendable {
     let displayName: String?
     let updatedAt: Date?
     let model: String?
+    let totalTokens: Int
 
     var isMainSession: Bool {
         kind == nil || kind == "main"

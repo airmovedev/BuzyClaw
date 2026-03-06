@@ -40,8 +40,11 @@ final class GatewayManager {
     private var process: Process?
     private var healthCheckTask: Task<Void, Never>?
     private var restartCount = 0
-    private let maxRestarts = 5
+    private let maxRestarts = 1
     private var usingExternalGateway = false
+    private var startingAt: Date?
+    private var recentStderr: String = ""
+    private var recentStdout: String = ""
 
     // MARK: - Start / Stop
 
@@ -58,10 +61,7 @@ final class GatewayManager {
             state = .error("未找到运行中的 Gateway，请先启动 OpenClaw 服务")
 
         case .freshInstall:
-            // Try existing first, fall back to launching our own process
-            if await tryConnectExisting() {
-                return
-            }
+            // Fresh install always launches its own isolated process
             await launchProcess()
         }
     }
@@ -107,10 +107,31 @@ final class GatewayManager {
     }
 
     func restartGateway() async {
-        stopGateway()
-        try? await Task.sleep(for: .milliseconds(500))
-        restartCount = 0
-        await launchProcess()
+        if mode == .existingInstall {
+            // Send restart signal to existing gateway via API
+            let url = URL(string: "http://localhost:\(port)/api/gateway/restart")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+            request.timeoutInterval = 5
+
+            _ = try? await URLSession.shared.data(for: request)
+
+            // Wait for gateway to restart
+            state = .starting
+            try? await Task.sleep(for: .seconds(3))
+
+            // Reconnect
+            if await tryConnectExisting() {
+                return
+            }
+            state = .error("Gateway 重启后无法重新连接")
+        } else {
+            stopGateway()
+            try? await Task.sleep(for: .milliseconds(500))
+            restartCount = 0
+            await launchProcess()
+        }
     }
 
     // MARK: - Process Lifecycle
@@ -125,6 +146,7 @@ final class GatewayManager {
             {
                 return (bundledNode, bundledOpenclaw, true)
             }
+            print("[Gateway] Bundled runtime NOT found. Tried: \(bundledNode.path) and \(bundledOpenclaw.path)")
         }
         // Dev fallback
         return (
@@ -146,19 +168,89 @@ final class GatewayManager {
         }
     }
 
-    private func launchProcess() async {
-        state = .starting
+    /// Create or update HOME/.openclaw/openclaw.json for fresh install mode.
+    /// This guarantees gateway.auth.token matches the runtime token used by the client.
+    private static func upsertGatewayConfig(at configFile: URL, authToken: String) {
+        var root: [String: Any] = [:]
 
-        // Find a free port
-        let freePort = Self.findFreePort()
-        guard freePort > 0 else {
-            state = .error("无法分配可用端口")
-            return
+        if let data = try? Data(contentsOf: configFile),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            root = json
         }
-        port = freePort
 
-        // Generate auth token
-        authToken = UUID().uuidString
+        // Cleanup invalid keys written by older builds (causes "Config invalid" -> exit code 1)
+        if var agents = root["agents"] as? [String: Any],
+           var defaults = agents["defaults"] as? [String: Any] {
+            if defaults["sessionMemory"] != nil {
+                defaults.removeValue(forKey: "sessionMemory")
+            }
+            if defaults["memorySearch"] is Bool {
+                defaults.removeValue(forKey: "memorySearch")
+            }
+            if var compaction = defaults["compaction"] as? [String: Any], compaction["memoryFlush"] is Bool {
+                compaction.removeValue(forKey: "memoryFlush")
+                defaults["compaction"] = compaction
+            }
+            agents["defaults"] = defaults
+            root["agents"] = agents
+        }
+
+        var gateway = root["gateway"] as? [String: Any] ?? [:]
+        gateway["mode"] = gateway["mode"] ?? "local"
+
+        var auth = gateway["auth"] as? [String: Any] ?? [:]
+        auth["mode"] = "token"
+        auth["token"] = authToken
+        gateway["auth"] = auth
+
+        var http = gateway["http"] as? [String: Any] ?? [:]
+        var endpoints = http["endpoints"] as? [String: Any] ?? [:]
+        var chatCompletions = endpoints["chatCompletions"] as? [String: Any] ?? [:]
+        chatCompletions["enabled"] = true
+        endpoints["chatCompletions"] = chatCompletions
+        http["endpoints"] = endpoints
+        gateway["http"] = http
+
+        root["gateway"] = gateway
+
+        // tools.agentToAgent — Agent 间消息互发
+        var tools = root["tools"] as? [String: Any] ?? [:]
+        var agentToAgent = tools["agentToAgent"] as? [String: Any] ?? [:]
+        agentToAgent["enabled"] = agentToAgent["enabled"] ?? true
+        agentToAgent["allow"] = agentToAgent["allow"] ?? ["*"]
+        tools["agentToAgent"] = agentToAgent
+        root["tools"] = tools
+
+
+        if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: configFile, options: .atomic)
+        }
+    }
+
+    private func launchProcess() async {
+        recentStderr = ""
+        recentStdout = ""
+        state = .starting
+        startingAt = Date()
+
+        // Reuse persisted port+token if available, otherwise allocate new ones
+        let savedPort = UserDefaults.standard.integer(forKey: "gateway.port")
+        let savedToken = UserDefaults.standard.string(forKey: "gateway.authToken")
+
+        if savedPort > 0, let token = savedToken, !token.isEmpty {
+            port = savedPort
+            authToken = token
+        } else {
+            let freePort = Self.findFreePort()
+            guard freePort > 0 else {
+                state = .error("无法分配可用端口")
+                return
+            }
+            port = freePort
+            authToken = UUID().uuidString
+            UserDefaults.standard.set(port, forKey: "gateway.port")
+            UserDefaults.standard.set(authToken, forKey: "gateway.authToken")
+        }
 
         // Data directory: use existing ~/.openclaw/ for now (shared with CLI)
         // Future: migrate to ~/Library/Application Support/ClawTower/
@@ -200,16 +292,24 @@ final class GatewayManager {
             let clawTowerDir = appSupport.appendingPathComponent("ClawTower")
             try? FileManager.default.createDirectory(at: clawTowerDir, withIntermediateDirectories: true)
             homeDir = clawTowerDir.path
+
+            // Write minimal openclaw.json so Gateway registers API routes
+            let configDir = clawTowerDir.appendingPathComponent(".openclaw")
+            try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+            let configFile = configDir.appendingPathComponent("openclaw.json")
+            Self.upsertGatewayConfig(at: configFile, authToken: authToken)
+            print("[Gateway] Ensured gateway config at \(configFile.path)")
         } else {
             homeDir = NSHomeDirectory()
         }
 
-        proc.environment = [
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "OPENCLAW_GATEWAY_TOKEN": authToken,
-            "HOME": homeDir,
-            "NODE_NO_WARNINGS": "1"
-        ]
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+        env["OPENCLAW_GATEWAY_TOKEN"] = authToken
+        env["HOME"] = homeDir
+        env["NODE_NO_WARNINGS"] = "1"
+        env["OPENCLAW_ALLOW_MULTI_GATEWAY"] = "1"
+        proc.environment = env
 
         // Capture stdout/stderr
         let stdoutPipe = Pipe()
@@ -217,21 +317,34 @@ final class GatewayManager {
         proc.standardOutput = stdoutPipe
         proc.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
                 print("[Gateway stdout] \(str)", terminator: "")
+                Task { @MainActor in
+                    self?.recentStdout += str
+                    if self?.recentStdout.count ?? 0 > 2000 {
+                        self?.recentStdout = String(self?.recentStdout.suffix(2000) ?? "")
+                    }
+                }
             }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
                 print("[Gateway stderr] \(str)", terminator: "")
+                Task { @MainActor in
+                    self?.recentStderr += str
+                    if self?.recentStderr.count ?? 0 > 2000 {
+                        self?.recentStderr = String(self?.recentStderr.suffix(2000) ?? "")
+                    }
+                }
             }
         }
 
         // Handle unexpected termination
         proc.terminationHandler = { [weak self] terminatedProc in
+            let exitCode = terminatedProc.terminationStatus
             Task { @MainActor [weak self] in
                 guard let self, self.process === terminatedProc else { return }
                 self.pid = nil
@@ -239,15 +352,29 @@ final class GatewayManager {
 
                 if self.state == .running || self.state == .starting {
                     // Unexpected crash — attempt restart
-                    self.handleCrash()
+                    self.handleCrash(exitCode: exitCode)
                 }
             }
+        }
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: paths.node.path) {
+            state = .error("Gateway 启动失败：找不到 Node.js\n路径: \(paths.node.path)\nBundled: \(paths.bundled)")
+            return
+        }
+        if !fm.isExecutableFile(atPath: paths.node.path) {
+            state = .error("Gateway 启动失败：Node.js 没有执行权限\n路径: \(paths.node.path)")
+            return
+        }
+        if !fm.fileExists(atPath: paths.openclaw.path) {
+            state = .error("Gateway 启动失败：找不到 OpenClaw\n路径: \(paths.openclaw.path)\nBundled: \(paths.bundled)")
+            return
         }
 
         do {
             try proc.run()
         } catch {
-            state = .error("无法启动 Gateway: \(error.localizedDescription)")
+            state = .error("无法启动 Gateway: \(error.localizedDescription)\nNode: \(paths.node.path)\nBundled: \(paths.bundled)")
             return
         }
 
@@ -280,19 +407,21 @@ final class GatewayManager {
         pid = nil
     }
 
-    private func handleCrash() {
+    private func handleCrash(exitCode: Int32 = -1) {
         healthCheckTask?.cancel()
         healthCheckTask = nil
 
+        let detail = recentStderr.isEmpty ? "" : "\n\n日志:\n\(recentStderr.suffix(500))"
+
         guard restartCount < maxRestarts else {
-            state = .error("Gateway 多次崩溃，已停止重试")
+            state = .error("Gateway 多次崩溃，已停止重试 (exit code: \(exitCode))\(detail)")
             return
         }
 
         restartCount += 1
         let delay = Double(min(restartCount * 2, 10)) // 2s, 4s, 6s, 8s, 10s
 
-        state = .error("Gateway 崩溃，\(Int(delay))秒后重试 (\(restartCount)/\(maxRestarts))")
+        state = .error("Gateway 崩溃 (exit code: \(exitCode))，\(Int(delay))秒后重试 (\(restartCount)/\(maxRestarts))\(detail)")
 
         Task {
             try? await Task.sleep(for: .seconds(delay))
@@ -333,7 +462,9 @@ final class GatewayManager {
             }
         } catch {
             if state == .starting {
-                // Still waiting for process to start — don't change state
+                if let startedAt = startingAt, Date().timeIntervalSince(startedAt) > 15 {
+                    state = .error("Gateway 启动超时（15秒无响应）\nPort: \(port)\nNode: \(process?.executableURL?.path ?? "nil")\nPID: \(pid?.description ?? "nil")")
+                }
             }
         }
     }

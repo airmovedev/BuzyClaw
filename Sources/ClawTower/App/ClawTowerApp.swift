@@ -1,10 +1,44 @@
 import SwiftUI
+import ServiceManagement
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Set ourselves as delegate for the main window to intercept close
+        DispatchQueue.main.async {
+            if let window = NSApp.windows.first(where: { $0.isVisible }) {
+                window.delegate = self
+                window.isReleasedWhenClosed = false
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            if let window = NSApp.windows.first(where: { $0.className != "NSStatusBarWindow" && !$0.className.contains("MenuBarExtra") }) {
+                window.isReleasedWhenClosed = false
+                if window.delegate == nil { window.delegate = self }
+                window.makeKeyAndOrderFront(nil)
+                return false
+            }
+        }
+        return true
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         appState?.stopGateway()
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        NSApp.hide(nil)
+        return false
     }
 }
 
@@ -13,7 +47,7 @@ struct ClawTowerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        Window("ClawTower", id: "main") {
             ContentView(appDelegate: appDelegate)
         }
         .windowStyle(.titleBar)
@@ -22,7 +56,7 @@ struct ClawTowerApp: App {
         MenuBarExtra("ClawTower", systemImage: "cpu") {
             Button("打开 ClawTower") {
                 NSApp.activate(ignoringOtherApps: true)
-                if let window = NSApp.windows.first {
+                if let window = NSApp.windows.first(where: { $0.className != "NSStatusBarWindow" && !$0.className.contains("MenuBarExtra") }) {
                     window.makeKeyAndOrderFront(nil)
                 }
             }
