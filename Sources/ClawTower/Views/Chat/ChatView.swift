@@ -1,4 +1,5 @@
 import SwiftUI
+import MarkdownUI
 
 import AppKit
 import UniformTypeIdentifiers
@@ -32,6 +33,7 @@ struct ChatView: View {
     @State private var scrollTrigger = 0
     @State private var currentModel: String
     @State private var lastUpdateTime: Date = .distantPast
+    @State private var rateLimitInfo: RateLimitInfo?
     init(agent: Agent, client: GatewayClient, sessionKey: String, injectedContext: String? = nil, appState: AppState) {
         self.agent = agent
         self.client = client
@@ -141,6 +143,7 @@ struct ChatView: View {
                             agentEmoji: agent.emoji,
                             isExpanded: expandedMessages.contains(message.id),
                             isLastMessage: message.id == displayMessages.last?.id,
+                            rateLimitInfo: message.id == displayMessages.last?.id ? rateLimitInfo : nil,
                             onToggleExpand: {
                                 if expandedMessages.contains(message.id) {
                                     expandedMessages.remove(message.id)
@@ -560,6 +563,10 @@ struct ChatView: View {
                     messages[idx].isStreaming = false
                     ChatMessageStore.shared.updateLastMessage(sessionKey: sessionKey, message: messages[idx])
                 }
+                // Capture rate limit info from the client after streaming
+                if let info = client.rateLimitInfo, info.hasData {
+                    rateLimitInfo = info
+                }
                 // Only clear streaming state if no newer stream has started
                 if streamingGeneration == myGeneration {
                     isStreaming = false
@@ -648,32 +655,6 @@ struct ChatView: View {
         }
     }
 
-}
-
-private class MarkdownCacheEntry: NSObject {
-    let value: AttributedString
-    init(value: AttributedString) { self.value = value }
-}
-
-nonisolated(unsafe) private let markdownCacheStorage: NSCache<NSString, MarkdownCacheEntry> = {
-    let c = NSCache<NSString, MarkdownCacheEntry>()
-    c.countLimit = 500
-    return c
-}()
-
-private func markdownAttributedString(_ string: String) -> AttributedString {
-    let key = NSString(string: "\(string.hashValue)")
-    if let cached = markdownCacheStorage.object(forKey: key) {
-        return cached.value
-    }
-    let attr: AttributedString
-    do {
-        attr = try AttributedString(markdown: string, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-    } catch {
-        attr = AttributedString(string)
-    }
-    markdownCacheStorage.setObject(MarkdownCacheEntry(value: attr), forKey: key)
-    return attr
 }
 
 private struct HistoryLoaderRow: View {
@@ -938,12 +919,13 @@ private struct MessageBubble: View {
     let agentEmoji: String
     let isExpanded: Bool
     let isLastMessage: Bool
+    var rateLimitInfo: RateLimitInfo? = nil
     let onToggleExpand: () -> Void
 
     @State private var isHovering = false
     @State private var didCopy = false
     @State private var pulseOpacity = 0.25
-    @State private var parsedMarkdown: AttributedString?
+    @State private var detectedPaths: [String] = []
 
     private var effectiveContent: String {
         displayContent ?? message.content
@@ -963,9 +945,7 @@ private struct MessageBubble: View {
         return nil
     }
 
-    private var detectedPaths: [String] {
-        guard message.isAssistant else { return [] }
-        let text = effectiveContent
+    nonisolated private static func extractPaths(from text: String) -> [String] {
         let patterns = [
             "~/[^\\s`\\)\\]>\"']+",
             "/Users/[^\\s`\\)\\]>\"']+",
@@ -1023,10 +1003,39 @@ private struct MessageBubble: View {
                         }
                     }
                 }
-
-                Text(message.timestamp, format: .dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+//
+//                HStack(spacing: 6) {
+//                    Text(message.timestamp, format: .dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
+//                        .font(.caption2)
+//                        .foregroundStyle(.tertiary)
+//
+//                    if message.isAssistant, let rateLimit = rateLimitInfo, rateLimit.hasData {
+//                        // 5H utilization - yellow (Claude only)
+//                        if let fiveH = rateLimit.fiveHourUtilization {
+//                            HStack(spacing: 3) {
+//                                Text("5H")
+//                                    .font(.system(size: 9))
+//                                    .foregroundStyle(.secondary)
+//                                RateLimitBar(value: fiveH, tint: .yellow)
+//                                Text("\(Int(fiveH * 100))%")
+//                                    .font(.system(size: 9))
+//                                    .foregroundStyle(.secondary)
+//                            }
+//                        }
+//                        // 7D utilization - blue
+//                        if let sevenD = rateLimit.sevenDayUtilization {
+//                            HStack(spacing: 3) {
+//                                Text("7D")
+//                                    .font(.system(size: 9))
+//                                    .foregroundStyle(.secondary)
+//                                RateLimitBar(value: sevenD, tint: .blue)
+//                                Text("\(Int(sevenD * 100))%")
+//                                    .font(.system(size: 9))
+//                                    .foregroundStyle(.secondary)
+//                            }
+//                        }
+//                    }
+//                }
             }
 
             if isLeftAligned { Spacer(minLength: 60) }
@@ -1040,35 +1049,23 @@ private struct MessageBubble: View {
 
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .trailing, spacing: 4) {
-                Group {
-                    if message.isStreaming && effectiveContent.isEmpty {
-                        ThinkingIndicator()
-                    } else if message.isStreaming || content.count > 4000 {
-                        Text(content).textSelection(.enabled)
-                    } else if let parsed = parsedMarkdown {
-                        Text(parsed).textSelection(.enabled)
-                    } else {
-                        Text(content).textSelection(.enabled)
-                            .task(id: content) {
-                                let src = content
-                                NSLog("🔥 [Markdown] start parse, length: %d", src.count)
-                                let mdStart = CFAbsoluteTimeGetCurrent()
-                                let result = await Task.detached {
-                                    markdownAttributedString(src)
-                                }.value
-                                let mdElapsed = CFAbsoluteTimeGetCurrent() - mdStart
-                                NSLog("🔥 [Markdown] done, length: %d, took %.1fms", src.count, mdElapsed * 1000)
-                                parsedMarkdown = result
-                            }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onChange(of: message.isStreaming) { _, newValue in
-                    if !newValue && content.count <= 4000 {
-                        // Streaming ended — trigger markdown parse
-                        NSLog("🔥 [StreamEnd] resetting markdown, content length: %d", content.count)
-                        parsedMarkdown = nil
-                    }
+                if message.isStreaming && effectiveContent.isEmpty {
+                    ThinkingIndicator()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if message.isStreaming || content.count > 4000 {
+                    // 长文本降级到 Text 避免性能问题
+                    Text(content)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    // 使用 MarkdownUI 渲染
+                    Markdown(content)
+                        .markdownTheme(.basic)
+                        .markdownTextStyle {
+                            FontSize(.em(0.85))
+                        }
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if showTruncateButton {
@@ -1124,6 +1121,24 @@ private struct MessageBubble: View {
         .onHover { hovering in
             isHovering = hovering
         }
+    }
+}
+
+private struct RateLimitBar: View {
+    let value: Double  // 0.0 - 1.0
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.gray.opacity(0.25))
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(tint)
+                    .frame(width: geo.size.width * min(max(value, 0), 1))
+            }
+        }
+        .frame(width: 44, height: 4)
     }
 }
 

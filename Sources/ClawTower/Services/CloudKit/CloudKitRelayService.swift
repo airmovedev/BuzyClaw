@@ -35,8 +35,7 @@ final class CloudKitRelayService {
     private var syncEngine: CKSyncEngine?
     private var relayClient: GatewayRelayClient?
     private var pollingTask: Task<Void, Never>?
-    private var processingMessageIDs: Set<String> = []
-    private var processedClientMessageIDs: Set<String> = []
+    private let messageGuard = MessageProcessingGuard()
     private var syncedCronRunIDs: Set<String> = []
     private var isCronInitialBackfill = false
     private var sessionHistoryLastSyncedMs: [String: Double] = [:]
@@ -132,7 +131,7 @@ final class CloudKitRelayService {
             // Load persisted sync state
             lastSyncEngineState = loadSyncState()
             syncedCronRunIDs = loadSyncedCronRunIDs()
-            processedClientMessageIDs = loadProcessedClientMessageIDs()
+            Task { await messageGuard.loadProcessedIDs(loadProcessedClientMessageIDs()) }
             sessionHistoryLastSyncedMs = loadSessionHistoryCursors()
             syncedGatewayMessageIDs = loadSessionSyncedMessageIDs()
             isCronInitialBackfill = syncedCronRunIDs.isEmpty
@@ -167,6 +166,11 @@ final class CloudKitRelayService {
 
             // Start fallback polling (every 3 seconds)
             startPolling()
+
+            // Register zone subscription for push-triggered fetch
+            Task {
+                await registerZoneSubscription()
+            }
 
             NSLog("[CloudKitRelay] Service started, polling every 3s")
             logger.info("CloudKit Relay Service started")
@@ -545,21 +549,20 @@ final class CloudKitRelayService {
     // MARK: - Message processing
 
     func processIncomingMessage(_ message: MessageRecord, record: CKRecord) async {
-        guard !processingMessageIDs.contains(message.id) else { return }
         guard message.direction == .toGateway, message.status == .pending else { return }
 
-        processingMessageIDs.insert(message.id)
-        defer { processingMessageIDs.remove(message.id) }
-
         let clientMessageId = extractClientMessageID(from: message)
-        if let clientMessageId, processedClientMessageIDs.contains(clientMessageId) {
-            do {
-                let latestRecord = try await database.record(for: record.recordID)
-                latestRecord["status"] = MessageStatus.delivered.rawValue as CKRecordValue
-                try await database.save(latestRecord)
-                logger.info("Skip duplicate relay for clientMessageId=\(clientMessageId)")
-            } catch {
-                logger.warning("Failed to ack duplicate message \(message.id) (non-critical): \(error.localizedDescription)")
+        guard await messageGuard.tryAcquire(messageID: message.id, clientMessageID: clientMessageId) else {
+            NSLog("[CloudKitRelay] Skip duplicate/in-progress message: %@", message.id)
+            // Still try to ACK if it was a duplicate (already processed)
+            if let cid = clientMessageId, await messageGuard.isProcessed(clientMessageID: cid) {
+                do {
+                    let latestRecord = try await database.record(for: record.recordID)
+                    latestRecord["status"] = MessageStatus.delivered.rawValue as CKRecordValue
+                    try await database.save(latestRecord)
+                } catch {
+                    logger.warning("Failed to ack duplicate message \(message.id) (non-critical): \(error.localizedDescription)")
+                }
             }
             return
         }
@@ -569,6 +572,16 @@ final class CloudKitRelayService {
         guard let relayClient else {
             logger.error("Relay client not configured")
             return
+        }
+
+        // ACK stage 1: mark as received (macOS got the message, about to forward to Gateway)
+        do {
+            let latestRecord = try await database.record(for: record.recordID)
+            latestRecord["status"] = MessageStatus.received.rawValue as CKRecordValue
+            try await database.save(latestRecord)
+            NSLog("[CloudKitRelay] ✅ ACK stage 1 (received) for %@", message.id)
+        } catch {
+            NSLog("[CloudKitRelay] ⚠️ ACK stage 1 failed for %@ (non-critical): %@", message.id, error.localizedDescription)
         }
 
         // Save image to local file and append path to message text (Gateway drops image_url content parts)
@@ -670,13 +683,8 @@ final class CloudKitRelayService {
             sessionHistoryLastSyncedMs[message.sessionKey] = max(sessionHistoryLastSyncedMs[message.sessionKey] ?? 0, nowMs)
             saveSessionHistoryCursors(sessionHistoryLastSyncedMs)
 
-            if let clientMessageId {
-                processedClientMessageIDs.insert(clientMessageId)
-                if processedClientMessageIDs.count > 2000 {
-                    processedClientMessageIDs = Set(processedClientMessageIDs.suffix(2000))
-                }
-                saveProcessedClientMessageIDs(processedClientMessageIDs)
-            }
+            await messageGuard.markProcessed(messageID: message.id, clientMessageID: clientMessageId)
+            saveProcessedClientMessageIDs(await messageGuard.allProcessedIDs())
 
             // 2. ACK original message (best effort — re-fetch to avoid oplock conflict)
             do {
@@ -693,6 +701,7 @@ final class CloudKitRelayService {
         } catch {
             NSLog("[CloudKitRelay] Relay failed for %@: %@", message.id, error.localizedDescription)
             logger.error("Failed to relay message \(message.id): \(error.localizedDescription)")
+            await messageGuard.release(messageID: message.id)
             lastError = error.localizedDescription
         }
     }
@@ -818,6 +827,36 @@ final class CloudKitRelayService {
         }
     }
 
+    // MARK: - Zone subscription
+
+    private func registerZoneSubscription() async {
+        let subscriptionID = "clawtower-relay-zone-changes"
+
+        do {
+            _ = try await database.subscription(for: subscriptionID)
+            NSLog("[CloudKitRelay] Zone subscription already exists")
+            return
+        } catch {
+            // Subscription doesn't exist, create it
+        }
+
+        let subscription = CKRecordZoneSubscription(
+            zoneID: CloudKitConstants.zoneID,
+            subscriptionID: subscriptionID
+        )
+
+        let notificationInfo = CKSubscription.NotificationInfo()
+        notificationInfo.shouldSendContentAvailable = true
+        subscription.notificationInfo = notificationInfo
+
+        do {
+            try await database.save(subscription)
+            NSLog("[CloudKitRelay] ✅ Zone subscription registered")
+        } catch {
+            NSLog("[CloudKitRelay] ⚠️ Failed to register zone subscription: %@", error.localizedDescription)
+        }
+    }
+
     // MARK: - Zone creation
 
     func ensureZoneExists() async {
@@ -923,5 +962,45 @@ private final class SyncEngineDelegate: CKSyncEngineDelegate {
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         await service.nextRecordZoneChangeBatch(context)
+    }
+}
+
+// MARK: - Message Processing Guard (actor-based dedup)
+
+private actor MessageProcessingGuard {
+    private var processingIDs: Set<String> = []
+    private var processedClientIDs: Set<String> = []
+
+    func tryAcquire(messageID: String, clientMessageID: String?) -> Bool {
+        if processingIDs.contains(messageID) { return false }
+        if let cid = clientMessageID, processedClientIDs.contains(cid) { return false }
+        processingIDs.insert(messageID)
+        return true
+    }
+
+    func markProcessed(messageID: String, clientMessageID: String?) {
+        processingIDs.remove(messageID)
+        if let cid = clientMessageID {
+            processedClientIDs.insert(cid)
+            if processedClientIDs.count > 2000 {
+                processedClientIDs = Set(processedClientIDs.suffix(1000))
+            }
+        }
+    }
+
+    func release(messageID: String) {
+        processingIDs.remove(messageID)
+    }
+
+    func isProcessed(clientMessageID: String) -> Bool {
+        processedClientIDs.contains(clientMessageID)
+    }
+
+    func loadProcessedIDs(_ ids: Set<String>) {
+        processedClientIDs = ids
+    }
+
+    func allProcessedIDs() -> Set<String> {
+        processedClientIDs
     }
 }

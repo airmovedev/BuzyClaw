@@ -4,88 +4,72 @@ struct HeartbeatSettingsView: View {
     @Bindable var appState: AppState
 
     private static let intervalOptions = ["30m", "1h", "2h", "4h"]
-    private static let modelOptions = [
-        "anthropic/claude-opus-4-6",
-        "anthropic/claude-sonnet-4-20250514",
-    ]
-    /// Sentinel value meaning "inherit default"
-    private static let inheritSentinel = "__inherit__"
 
     @State private var globalEnabled = false
     @State private var defaultInterval = "1h"
-    @State private var defaultModel = "anthropic/claude-opus-4-6"
-    @State private var agents: [AgentHeartbeatConfig] = []
+    @State private var defaultModel = ""
     @State private var hasLoaded = false
-    @State private var showSavedHint = false
-
-    struct AgentHeartbeatConfig: Identifiable {
-        let id: String
-        let displayName: String
-        /// Empty string = inherit default
-        var interval: String
-        var model: String
-    }
+    @State private var saveTask: Task<Void, Never>?
+    @State private var modelOptions: [ModelOption] = []
 
     var body: some View {
-        GroupBox("心跳设置") {
-            VStack(alignment: .leading, spacing: 12) {
-                // Global toggle
-                Toggle("启用全局心跳", isOn: $globalEnabled)
-                    .fontWeight(.medium)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("心跳设置")
+                    .font(.headline)
+                Spacer()
+            }
 
-                if globalEnabled {
-                    // Global defaults
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Text("默认").fontWeight(.medium)
+                        Text("全局心跳")
                         Spacer()
-                        Picker("间隔", selection: $defaultInterval) {
-                            ForEach(Self.intervalOptions, id: \.self) { Text($0) }
-                        }
-                        .frame(width: 90)
-                        Picker("模型", selection: $defaultModel) {
-                            ForEach(Self.modelOptions, id: \.self) { Text($0).tag($0) }
-                        }
-                        .frame(width: 280)
+                        Toggle("", isOn: $globalEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .scaleEffect(0.7)
+                            .frame(width: 36, height: 20)
                     }
 
-                    if !agents.isEmpty {
-                        Divider()
-                        Text("Per-Agent 覆盖").font(.caption).foregroundStyle(.secondary)
-                        ForEach($agents) { $agent in
-                            HStack {
-                                Text(agent.displayName)
-                                Spacer()
-                                Picker("间隔", selection: $agent.interval) {
-                                    Text("继承默认").tag("")
+                    Text("全局心跳将会定期消耗 Token，建议选择轻量级模型，并扩大心跳间隔时间，减少消耗。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if globalEnabled {
+                        HStack {
+                            Spacer()
+                            HStack(spacing: 12) {
+                                Picker("模型", selection: $defaultModel) {
+                                    ForEach(modelOptions) { option in
+                                        Text(option.label).tag(option.id)
+                                    }
+                                }
+                                .labelsHidden()
+                                .frame(minWidth: 260)
+
+                                Picker("间隔", selection: $defaultInterval) {
                                     ForEach(Self.intervalOptions, id: \.self) { Text($0).tag($0) }
                                 }
-                                .frame(width: 110)
-                                Picker("模型", selection: $agent.model) {
-                                    Text("继承默认").tag("")
-                                    ForEach(Self.modelOptions, id: \.self) { Text($0).tag($0) }
-                                }
-                                .frame(width: 280)
+                                .labelsHidden()
+                                .frame(width: 120)
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                 }
-
-                HStack {
-                    Spacer()
-                    if showSavedHint {
-                        Text("✅ 已保存，下次重启 Gateway 后生效")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .transition(.opacity)
-                    }
-                    Button("保存心跳设置") { save() }
-                        .buttonStyle(.borderedProminent)
-                }
-                .animation(.easeInOut, value: showSavedHint)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(8)
         }
-        .onAppear { if !hasLoaded { load(); hasLoaded = true } }
+        .onAppear { load() }
+        .onChange(of: globalEnabled) { _, _ in scheduleSaveIfLoaded() }
+        .onChange(of: defaultInterval) { _, _ in scheduleSaveIfLoaded() }
+        .onChange(of: defaultModel) { _, _ in scheduleSaveIfLoaded() }
+        .onDisappear {
+            saveTask?.cancel()
+            saveTask = nil
+        }
     }
 
     private var configURL: URL {
@@ -100,34 +84,86 @@ struct HeartbeatSettingsView: View {
     }
 
     private func load() {
-        guard let json = readConfig(),
-              let agentsObj = json["agents"] as? [String: Any] else { return }
+        hasLoaded = false
+        defer { hasLoaded = true }
 
-        // Defaults
-        if let defaults = agentsObj["defaults"] as? [String: Any],
-           let hb = defaults["heartbeat"] as? [String: Any] {
-            globalEnabled = true
-            if let every = hb["every"] as? String { defaultInterval = every }
-            if let model = hb["model"] as? String { defaultModel = model }
-        } else {
+        guard let json = readConfig() else {
             globalEnabled = false
+            buildModelOptions(from: nil)
+            return
         }
 
-        // Agent list
-        if let list = agentsObj["list"] as? [[String: Any]] {
-            agents = list.map { a in
-                let id = a["id"] as? String ?? "unknown"
-                let identity = a["identity"] as? [String: Any]
-                let name = identity?["name"] as? String ?? id
-                let hb = a["heartbeat"] as? [String: Any]
-                let agentEvery = hb?["every"] as? String ?? ""
-                let agentModel = hb?["model"] as? String ?? ""
-                return AgentHeartbeatConfig(
-                    id: id,
-                    displayName: name,
-                    interval: agentEvery,
-                    model: agentModel
-                )
+        var heartbeatModelFromConfig: String?
+        if let agentsObj = json["agents"] as? [String: Any],
+           let defaults = agentsObj["defaults"] as? [String: Any] {
+            if let hb = defaults["heartbeat"] as? [String: Any] {
+                globalEnabled = true
+                if let every = hb["every"] as? String { defaultInterval = every }
+                if let model = hb["model"] as? String {
+                    defaultModel = model
+                    heartbeatModelFromConfig = model
+                }
+            } else {
+                globalEnabled = false
+            }
+
+            buildModelOptions(from: defaults)
+            if defaultModel.isEmpty {
+                if let first = modelOptions.first?.id {
+                    defaultModel = first
+                } else if let fallback = heartbeatModelFromConfig {
+                    defaultModel = fallback
+                }
+            }
+            return
+        }
+
+        globalEnabled = false
+        buildModelOptions(from: nil)
+    }
+
+    private func buildModelOptions(from defaults: [String: Any]?) {
+        var options: [ModelOption] = []
+
+        if let models = defaults?["models"] as? [String: Any] {
+            for (modelId, value) in models {
+                let alias = (value as? [String: Any])?["alias"] as? String
+                let label = buildLabel(alias: alias, modelId: modelId)
+                options.append(ModelOption(id: modelId, label: label))
+            }
+        }
+
+        options.sort { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        modelOptions = options
+
+        if !defaultModel.isEmpty,
+           !options.contains(where: { $0.id == defaultModel }) {
+            modelOptions.insert(ModelOption(id: defaultModel, label: buildLabel(alias: nil, modelId: defaultModel)), at: 0)
+        }
+    }
+
+    private func buildLabel(alias: String?, modelId: String) -> String {
+        let trimmedAlias = alias?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedAlias.isEmpty {
+            return "\(trimmedAlias) (\(modelId))"
+        }
+        return modelId
+    }
+
+    private func scheduleSaveIfLoaded() {
+        guard hasLoaded else { return }
+
+        if globalEnabled, defaultModel.isEmpty, let first = modelOptions.first?.id {
+            defaultModel = first
+            return
+        }
+
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                save()
             }
         }
     }
@@ -136,7 +172,6 @@ struct HeartbeatSettingsView: View {
         guard var json = readConfig(),
               var agentsObj = json["agents"] as? [String: Any] else { return }
 
-        // Update defaults
         var defaults = agentsObj["defaults"] as? [String: Any] ?? [:]
         if globalEnabled {
             defaults["heartbeat"] = ["every": defaultInterval, "model": defaultModel]
@@ -144,36 +179,15 @@ struct HeartbeatSettingsView: View {
             defaults.removeValue(forKey: "heartbeat")
         }
         agentsObj["defaults"] = defaults
-
-        // Update each agent's heartbeat
-        if var list = agentsObj["list"] as? [[String: Any]] {
-            for i in list.indices {
-                let agentId = list[i]["id"] as? String ?? ""
-                if let config = agents.first(where: { $0.id == agentId }) {
-                    var hb: [String: Any] = [:]
-                    if !config.interval.isEmpty { hb["every"] = config.interval }
-                    if !config.model.isEmpty { hb["model"] = config.model }
-                    if hb.isEmpty {
-                        list[i].removeValue(forKey: "heartbeat")
-                    } else {
-                        list[i]["heartbeat"] = hb
-                    }
-                }
-            }
-            agentsObj["list"] = list
-        }
-
         json["agents"] = agentsObj
 
-        // Write back
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: configURL)
-        }
-
-        showSavedHint = true
-        Task {
-            try? await Task.sleep(for: .seconds(2))
-            await MainActor.run { showSavedHint = false }
+            try? data.write(to: configURL, options: .atomic)
         }
     }
+}
+
+private struct ModelOption: Identifiable {
+    let id: String
+    let label: String
 }

@@ -1,6 +1,56 @@
 import SwiftUI
 import ServiceManagement
 
+struct DetectedModel: Identifiable {
+    let id = UUID()
+    let fullId: String      // e.g. "anthropic/claude-sonnet-4-20250514"
+    let displayName: String // e.g. "Claude Sonnet 4"
+    let provider: String    // e.g. "anthropic"
+    let isClaude: Bool      // provider contains "anthropic"
+    let tint: Color         // based on provider
+    let icon: String        // SF Symbol name
+
+    init(fullId: String) {
+        self.fullId = fullId
+        let parts = fullId.split(separator: "/", maxSplits: 1)
+        self.provider = parts.count >= 2 ? String(parts[0]) : "unknown"
+        let modelSlug = parts.count >= 2 ? String(parts[1]) : fullId
+        self.isClaude = provider.contains("anthropic")
+        self.displayName = Self.humanName(for: modelSlug, provider: provider)
+
+        switch provider {
+        case "anthropic":
+            self.tint = .purple; self.icon = "brain.head.profile"
+        case "openai", "openai-codex":
+            self.tint = .green; self.icon = "bubble.left.and.bubble.right"
+        case "minimax", "minimax-portal":
+            self.tint = .orange; self.icon = "sparkles"
+        case "moonshot":
+            self.tint = .blue; self.icon = "moon.stars"
+        case "zai":
+            self.tint = .cyan; self.icon = "text.word.spacing"
+        case "qwen":
+            self.tint = .indigo; self.icon = "cloud"
+        case "google":
+            self.tint = .red; self.icon = "globe"
+        case "xai":
+            self.tint = .gray; self.icon = "bolt"
+        case "openrouter":
+            self.tint = .mint; self.icon = "arrow.triangle.branch"
+        default:
+            self.tint = .secondary; self.icon = "cpu"
+        }
+    }
+
+    private static func humanName(for slug: String, provider: String) -> String {
+        var name = slug
+            .replacingOccurrences(of: "-20\\d{6}", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "-", with: " ")
+        name = name.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+        return name
+    }
+}
+
 struct SettingsView: View {
     @Bindable var appState: AppState
     @State private var apiKey = ""
@@ -17,54 +67,77 @@ struct SettingsView: View {
                 Text("设置")
                     .font(.largeTitle.bold())
 
-                // Gateway Status
-                GroupBox("Gateway 状态") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Circle()
-                                .fill(statusColor)
-                                .frame(width: 10, height: 10)
-                            Text(appState.gatewayManager.statusText)
-                            Spacer()
-                            Button("重启") {
-                                Task { await appState.restartGateway() }
-                            }
-                        }
-
-                        if appState.gatewayManager.isRunning {
-                            HStack(spacing: 16) {
-                                Label("端口: \(appState.gatewayManager.port)", systemImage: "network")
-                                if let pid = appState.gatewayManager.pid {
-                                    Label("PID: \(pid)", systemImage: "gearshape")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Gateway 状态")
+                            .font(.headline)
+                        Spacer()
+                    }
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Circle()
+                                    .fill(statusColor)
+                                    .frame(width: 10, height: 10)
+                                Text(appState.gatewayManager.statusText)
+                                Spacer()
+                                Button("重启") {
+                                    Task { await appState.restartGateway() }
                                 }
                             }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+
+                            if appState.gatewayManager.isRunning {
+                                HStack(spacing: 16) {
+                                    Label("端口: \(appState.gatewayManager.port)", systemImage: "network")
+                                    if let pid = appState.gatewayManager.pid {
+                                        Label("PID: \(pid)", systemImage: "gearshape")
+                                    }
+                                }
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
                         }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(8)
                 }
 
-                // AI Account
-                GroupBox("AI 服务") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if !detectedProviders.isEmpty {
-                            ForEach(detectedProviders, id: \.self) { provider in
-                                HStack {
-                                    Label(providerDisplayName(provider), systemImage: "checkmark.circle.fill")
-                                        .foregroundStyle(.green)
-                                    Spacer()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("AI 模型")
+                            .font(.headline)
+                        Spacer()
+                        Button {
+                            showProviderSheet = true
+                        } label: {
+                            Label("新增", systemImage: "plus")
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .accessibilityLabel("配置 AI 服务")
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            if detectedModels.isEmpty {
+                                Text("未配置 AI 服务")
+                                    .foregroundStyle(.secondary)
+                                Button("配置 AI 服务") { showProviderSheet = true }
+                                    .buttonStyle(.borderedProminent)
+                            } else {
+                                VStack(spacing: 0) {
+                                    ForEach(Array(detectedModels.enumerated()), id: \.element.fullId) { index, model in
+                                        ModelUsageRow(model: model, client: appState.gatewayClient)
+                                        if index < detectedModels.count - 1 {
+                                            Divider()
+                                        }
+                                    }
                                 }
                             }
-                            Button("更换") { showProviderSheet = true }
-                        } else {
-                            Text("未配置 AI 服务")
-                                .foregroundStyle(.secondary)
-                            Button("配置") { showProviderSheet = true }
-                                .buttonStyle(.borderedProminent)
                         }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(8)
                 }
                 .onAppear { detectAuthProfiles() }
                 .sheet(isPresented: $showProviderSheet) {
@@ -73,92 +146,124 @@ struct SettingsView: View {
                         .onDisappear { detectAuthProfiles() }
                 }
 
-                // Tools Profile
-                GroupBox("工具权限 (Tools Profile)") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Picker("工具权限级别", selection: $currentToolsProfile) {
-                            Text("🔒 精简 Minimal").tag("minimal")
-                            Text("💬 消息 Messaging").tag("messaging")
-                            Text("💻 编程 Coding").tag("coding")
-                            Text("🔓 完整 Full").tag("full")
-                        }
-                        .onChange(of: currentToolsProfile) { _, newValue in
-                            saveToolsProfile(newValue)
-                            showRestartHint = true
-                        }
-
-                        Text(toolsProfileDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        if showRestartHint {
-                            HStack(spacing: 6) {
-                                Image(systemName: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                                Text("需要重启 Gateway 才能生效")
-                                    .foregroundStyle(.orange)
-                                Spacer()
-                                Button("重启") {
-                                    Task {
-                                        await appState.restartGateway()
-                                        showRestartHint = false
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                            }
-                            .font(.caption)
-                        }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("工具权限")
+                            .font(.headline)
+                        Spacer()
                     }
-                    .padding(8)
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("权限级别")
+                                Spacer()
+                                Picker("工具权限级别", selection: $currentToolsProfile) {
+                                    Text("精简").tag("minimal")
+                                    Text("消息").tag("messaging")
+                                    Text("编程").tag("coding")
+                                    Text("完整").tag("full")
+                                }
+                                .labelsHidden()
+                            }
+                            .onChange(of: currentToolsProfile) { _, newValue in
+                                saveToolsProfile(newValue)
+                                showRestartHint = true
+                            }
+
+                            Text(toolsProfileDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if showRestartHint {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text("需要重启 Gateway 才能生效")
+                                        .foregroundStyle(.orange)
+                                    Spacer()
+                                    Button("重启") {
+                                        Task {
+                                            await appState.restartGateway()
+                                            showRestartHint = false
+                                        }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                                .font(.caption)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .onAppear { loadToolsProfile() }
 
-                // Heartbeat
                 HeartbeatSettingsView(appState: appState)
 
-                // Launch at Login
-                GroupBox("通用") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Toggle("开机自启动", isOn: $launchAtLogin)
-                            .onChange(of: launchAtLogin) { _, newValue in
-                                do {
-                                    if newValue {
-                                        try SMAppService.mainApp.register()
-                                    } else {
-                                        try SMAppService.mainApp.unregister()
-                                    }
-                                } catch {
-                                    launchAtLogin = !newValue
-                                }
-                            }
-                        Text("登录时自动启动 ClawTower，保持 Gateway 常驻运行")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("开机自启动")
+                            .font(.headline)
+                        Spacer()
                     }
-                    .padding(8)
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("开机自启动")
+                                Spacer()
+                                Toggle("", isOn: $launchAtLogin)
+                                    .toggleStyle(.switch)
+                                    .labelsHidden()
+                                    .scaleEffect(0.7)
+                                    .frame(width: 36, height: 20)
+                                    .onChange(of: launchAtLogin) { _, newValue in
+                                        do {
+                                            if newValue {
+                                                try SMAppService.mainApp.register()
+                                            } else {
+                                                try SMAppService.mainApp.unregister()
+                                            }
+                                        } catch {
+                                            launchAtLogin = !newValue
+                                        }
+                                    }
+                            }
+
+                            Text("登录时自动启动 ClawTower，保持 Gateway 常驻运行")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
-                // About
-                GroupBox("关于") {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("ClawTower v1.0.0")
-                        Text("基于 OpenClaw 开源项目")
-                            .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("重置引导")
+                            .font(.headline)
+                        Spacer()
                     }
-                    .padding(8)
-                }
-                // 重置
-                GroupBox("重置") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("重新进入引导设置，将清除当前配置。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("重置引导配置", role: .destructive) {
-                            showResetAlert = true
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("重新进入引导设置，将清除当前配置。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            HStack {
+                                Spacer()
+                                Button("重置引导配置", role: .destructive) {
+                                    showResetAlert = true
+                                }
+                            }
                         }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .padding(8)
                 }
             }
             .padding(20)
@@ -185,7 +290,6 @@ struct SettingsView: View {
             detectedProviders = []
             return
         }
-        // Extract unique provider names from profile keys like "anthropic:default"
         var providers: [String] = []
         for (key, value) in profiles {
             if let dict = value as? [String: Any], let provider = dict["provider"] as? String {
@@ -198,12 +302,96 @@ struct SettingsView: View {
         detectedProviders = providers
     }
 
-    private func providerDisplayName(_ provider: String) -> String {
-        switch provider {
-        case "anthropic": return "Anthropic (Claude)"
-        case "openai": return "OpenAI (ChatGPT)"
-        default: return provider
+    private var detectedModels: [DetectedModel] {
+        var modelIds = Set<String>()
+        var models: [DetectedModel] = []
+        var providersWithModels = Set<String>()
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let configPath = home.appendingPathComponent(".openclaw/openclaw.json").path
+        let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath))
+        let configJson = configData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+
+        if let json = configJson,
+           let modelsConfig = json["models"] as? [String: Any],
+           let providers = modelsConfig["providers"] {
+
+            if let providerArray = providers as? [[String: Any]] {
+                for provider in providerArray {
+                    if let providerModels = provider["models"] as? [String] {
+                        for m in providerModels where !modelIds.contains(m) {
+                            modelIds.insert(m)
+                            models.append(DetectedModel(fullId: m))
+                            let p = m.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+                            if !p.isEmpty { providersWithModels.insert(p) }
+                        }
+                    }
+                    if let singleModel = provider["model"] as? String, !modelIds.contains(singleModel) {
+                        modelIds.insert(singleModel)
+                        models.append(DetectedModel(fullId: singleModel))
+                        let p = singleModel.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""
+                        if !p.isEmpty { providersWithModels.insert(p) }
+                    }
+                }
+            }
+
+            if let providerDict = providers as? [String: Any] {
+                for (providerKey, providerValue) in providerDict {
+                    guard let providerInfo = providerValue as? [String: Any] else { continue }
+                    if let modelArray = providerInfo["models"] as? [[String: Any]] {
+                        for modelObj in modelArray {
+                            guard let modelId = modelObj["id"] as? String else { continue }
+                            let fullId = "\(providerKey)/\(modelId)"
+                            if !modelIds.contains(fullId) {
+                                modelIds.insert(fullId)
+                                models.append(DetectedModel(fullId: fullId))
+                                providersWithModels.insert(providerKey)
+                            }
+                        }
+                    }
+                    if let modelStrings = providerInfo["models"] as? [String] {
+                        for modelId in modelStrings {
+                            let fullId = modelId.contains("/") ? modelId : "\(providerKey)/\(modelId)"
+                            if !modelIds.contains(fullId) {
+                                modelIds.insert(fullId)
+                                models.append(DetectedModel(fullId: fullId))
+                                providersWithModels.insert(providerKey)
+                            }
+                        }
+                    }
+                }
+            }
         }
+
+        if let json = configJson,
+           let auth = json["auth"] as? [String: Any],
+           let profiles = auth["profiles"] as? [String: Any] {
+            for profileKey in profiles.keys {
+                let provider = profileKey.components(separatedBy: ":").first ?? profileKey
+                guard !providersWithModels.contains(provider) else { continue }
+
+                switch provider {
+                case "anthropic":
+                    let m = "anthropic/claude-opus-4-6"
+                    if !modelIds.contains(m) {
+                        modelIds.insert(m)
+                        models.append(DetectedModel(fullId: m))
+                        providersWithModels.insert(provider)
+                    }
+                case "openai-codex":
+                    let m = "openai-codex/gpt-5.3-codex"
+                    if !modelIds.contains(m) {
+                        modelIds.insert(m)
+                        models.append(DetectedModel(fullId: m))
+                        providersWithModels.insert(provider)
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        return models
     }
 
     private var toolsProfileDescription: String {

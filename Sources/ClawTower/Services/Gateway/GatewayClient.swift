@@ -1,9 +1,42 @@
 import Foundation
 
+struct ModelUsageInfo: Sendable, Codable {
+    var isAvailable: Bool = false
+    // Claude-specific
+    var fiveHourUtilization: Double?  // 0.0-1.0
+    var sevenDayUtilization: Double?  // 0.0-1.0
+    // Generic rate limit (OpenAI, etc.)
+    var requestUtilization: Double?   // 0.0-1.0, calculated from remaining/limit
+    var tokenUtilization: Double?     // 0.0-1.0, calculated from remaining/limit
+    var updatedAt: Date = Date()
+    var errorMessage: String?
+    // Extended rate limit info
+    var resetTime: Date?              // rate limit reset time (OpenAI)
+    var fiveHourResetTime: Date?      // Anthropic unified 5h reset time
+    var sevenDayResetTime: Date?      // Anthropic unified 7d reset time
+    var tokensLimit: Int?             // total token quota
+    var tokensRemaining: Int?         // remaining tokens
+
+    var hasUsageData: Bool {
+        fiveHourUtilization != nil || sevenDayUtilization != nil || requestUtilization != nil || tokenUtilization != nil
+    }
+}
+
+struct RateLimitInfo: Sendable {
+    var fiveHourUtilization: Double?  // 0.0 - 1.0
+    var sevenDayUtilization: Double?  // 0.0 - 1.0
+    var updatedAt: Date = Date()
+
+    var hasData: Bool {
+        fiveHourUtilization != nil || sevenDayUtilization != nil
+    }
+}
+
 @MainActor
 final class GatewayClient: Sendable {
     private(set) var baseURL: URL
     private(set) var authToken: String?
+    private(set) var rateLimitInfo: RateLimitInfo?
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -365,13 +398,38 @@ final class GatewayClient: Sendable {
                         return
                     }
 
+                    // Extract rate limit headers from SSE response
+                    do {
+                        var info = RateLimitInfo()
+                        let headers = http.allHeaderFields
+                        NSLog("[Gateway SSE] Response headers: %@", headers as NSDictionary)
+                        // Try case-insensitive header lookup
+                        for (key, value) in headers {
+                            let keyStr = "\(key)".lowercased()
+                            if keyStr == "anthropic-ratelimit-unified-5h-utilization",
+                               let val = Double("\(value)") {
+                                info.fiveHourUtilization = val
+                            }
+                            if keyStr == "anthropic-ratelimit-unified-7d-utilization",
+                               let val = Double("\(value)") {
+                                info.sevenDayUtilization = val
+                            }
+                        }
+                        if info.hasData {
+                            await MainActor.run { self.rateLimitInfo = info }
+                            NSLog("[Gateway] Rate limit from headers: 5H=%.3f 7D=%.3f",
+                                  info.fiveHourUtilization ?? -1, info.sevenDayUtilization ?? -1)
+                        }
+                    }
+
+                    var lastDataLine: String?
                     for try await line in bytes.lines {
                         if line.hasPrefix("data: ") {
                             let jsonStr = String(line.dropFirst(6))
                             if jsonStr == "[DONE]" {
-                                continuation.finish()
-                                return
+                                break
                             }
+                            lastDataLine = jsonStr
                             if let data = jsonStr.data(using: .utf8),
                                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                                 // 正常消息
@@ -391,6 +449,35 @@ final class GatewayClient: Sendable {
                             }
                         }
                     }
+
+                    // If headers didn't have rate limit info, check the last SSE data chunk
+                    if await self.rateLimitInfo?.hasData != true, let lastJson = lastDataLine,
+                       let data = lastJson.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        // Check for usage/ratelimit fields in the final SSE chunk
+                        var info = RateLimitInfo()
+                        if let usage = json["usage"] as? [String: Any] {
+                            if let fiveH = usage["anthropic_ratelimit_unified_5h_utilization"] as? Double {
+                                info.fiveHourUtilization = fiveH
+                            }
+                            if let sevenD = usage["anthropic_ratelimit_unified_7d_utilization"] as? Double {
+                                info.sevenDayUtilization = sevenD
+                            }
+                        }
+                        // Also check top-level ratelimit fields
+                        if let fiveH = json["anthropic_ratelimit_unified_5h_utilization"] as? Double {
+                            info.fiveHourUtilization = fiveH
+                        }
+                        if let sevenD = json["anthropic_ratelimit_unified_7d_utilization"] as? Double {
+                            info.sevenDayUtilization = sevenD
+                        }
+                        if info.hasData {
+                            await MainActor.run { self.rateLimitInfo = info }
+                            NSLog("[Gateway] Rate limit from SSE data: 5H=%.3f 7D=%.3f",
+                                  info.fiveHourUtilization ?? -1, info.sevenDayUtilization ?? -1)
+                        }
+                    }
+
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -520,13 +607,43 @@ final class GatewayClient: Sendable {
 
     // MARK: - CLI Helper
 
+    private struct RuntimeCommand {
+        let executable: URL
+        let argumentsPrefix: [String]
+        let bundled: Bool
+    }
+
+    private static func resolveCLICommand() -> RuntimeCommand {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
+            let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
+            if FileManager.default.fileExists(atPath: bundledNode.path)
+                && FileManager.default.fileExists(atPath: bundledOpenclaw.path)
+            {
+                return RuntimeCommand(
+                    executable: bundledNode,
+                    argumentsPrefix: [bundledOpenclaw.path],
+                    bundled: true
+                )
+            }
+        }
+
+        // Dev fallback
+        return RuntimeCommand(
+            executable: URL(fileURLWithPath: "/usr/local/bin/openclaw"),
+            argumentsPrefix: [],
+            bundled: false
+        )
+    }
+
     private func runCLI(arguments: [String]) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
+                    let command = Self.resolveCLICommand()
                     let process = Process()
-                    process.executableURL = URL(fileURLWithPath: "/usr/local/bin/openclaw")
-                    process.arguments = arguments
+                    process.executableURL = command.executable
+                    process.arguments = command.argumentsPrefix + arguments
 
                     // Ensure PATH includes common node/bin paths
                     var env = ProcessInfo.processInfo.environment
@@ -537,7 +654,12 @@ final class GatewayClient: Sendable {
                     env["PATH"] = allPaths.joined(separator: ":")
                     process.environment = env
 
-                    NSLog("[ClawTower] runCLI: openclaw %@", arguments.joined(separator: " "))
+                    NSLog(
+                        "[ClawTower] runCLI (%@): %@ %@",
+                        command.bundled ? "bundled" : "system",
+                        command.executable.path,
+                        (command.argumentsPrefix + arguments).joined(separator: " ")
+                    )
 
                     let pipe = Pipe()
                     process.standardOutput = pipe
@@ -659,6 +781,398 @@ final class GatewayClient: Sendable {
             }
             try? fm.copyItem(atPath: mainUserMD, toPath: destUserMD)
         }
+    }
+
+    // MARK: - Model Usage Probe
+
+    /// Sends a minimal request to probe model availability and rate limit info.
+    /// For Claude models: extracts 5h/7d utilization from headers or SSE body.
+    /// For other models: only checks availability (HTTP 200).
+    /// Look up an HTTP header value by case-insensitive key.
+    private static func headerValue(from response: HTTPURLResponse, key: String) -> String? {
+        let lowered = key.lowercased()
+        for (k, v) in response.allHeaderFields {
+            if "\(k)".lowercased() == lowered {
+                return "\(v)"
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Auth Profiles
+
+    /// Reads auth-profiles.json to get provider credentials.
+    private struct AuthProfile {
+        let token: String?   // For token-based auth (Anthropic)
+        let access: String?  // For OAuth-based auth (OpenAI, MiniMax)
+    }
+
+    private static func readAuthProfile(for provider: String) -> AuthProfile? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let profileURL = home.appendingPathComponent(".openclaw/agents/main/agent/auth-profiles.json")
+        guard let data = try? Data(contentsOf: profileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let profiles = json["profiles"] as? [String: [String: Any]] else {
+            NSLog("[ModelProbe] Failed to read auth-profiles.json")
+            return nil
+        }
+
+        // Look for "{provider}:default" first, then any key starting with "{provider}:"
+        let defaultKey = "\(provider):default"
+        let profile = profiles[defaultKey] ?? profiles.first(where: { $0.key.hasPrefix("\(provider):") })?.value
+        guard let profile else {
+            NSLog("[ModelProbe] No auth profile found for provider: %@", provider)
+            return nil
+        }
+
+        return AuthProfile(
+            token: profile["token"] as? String,
+            access: profile["access"] as? String
+        )
+    }
+
+    /// Parses an ISO 8601 date string (e.g. "2025-03-07T19:00:00Z") into a Date.
+    private static func parseISO8601(_ string: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: string) { return date }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: string)
+    }
+
+    /// Parses reset duration strings like "6m30s", "1h2m3s", "6d 23h", "4h 43m" into a Date.
+    private static func parseResetDuration(_ string: String) -> Date? {
+        var totalSeconds: TimeInterval = 0
+        let scanner = Scanner(string: string)
+        while !scanner.isAtEnd {
+            var value: Double = 0
+            if scanner.scanDouble(&value) {
+                if scanner.scanString("d") != nil {
+                    totalSeconds += value * 86400
+                } else if scanner.scanString("h") != nil {
+                    totalSeconds += value * 3600
+                } else if scanner.scanString("ms") != nil {
+                    totalSeconds += value / 1000
+                } else if scanner.scanString("m") != nil {
+                    totalSeconds += value * 60
+                } else if scanner.scanString("s") != nil {
+                    totalSeconds += value
+                }
+            } else {
+                scanner.currentIndex = scanner.string.index(after: scanner.currentIndex)
+            }
+        }
+        return totalSeconds > 0 ? Date().addingTimeInterval(totalSeconds) : nil
+    }
+
+    private static func parseLeftPercent(in text: String, pattern: String) -> Int? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges >= 2,
+              let percentRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return Int(text[percentRange])
+    }
+
+    private static func parseStatusResetTime(in text: String, pattern: String) -> Date? {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, options: [], range: range),
+              match.numberOfRanges >= 2,
+              let durationRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        let durationText = String(text[durationRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return parseResetDuration(durationText)
+    }
+
+    func probeModelUsage(model: String) async -> ModelUsageInfo {
+        var result = ModelUsageInfo()
+
+        // Determine provider from model fullId (e.g. "anthropic/claude-opus-4-6")
+        let parts = model.split(separator: "/", maxSplits: 1)
+        let provider = parts.count >= 2 ? String(parts[0]) : ""
+        let modelSlug = parts.count >= 2 ? String(parts[1]) : model
+
+        do {
+            switch provider {
+            case "anthropic":
+                guard let auth = Self.readAuthProfile(for: "anthropic"), let token = auth.token else {
+                    result.errorMessage = "无 Anthropic 凭证"
+                    return result
+                }
+                let url = URL(string: "https://api.anthropic.com/v1/messages")!
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue(token, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+
+                let body: [String: Any] = [
+                    "model": modelSlug,
+                    "max_tokens": 1,
+                    "messages": [["role": "user", "content": "."]]
+                ]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    result.errorMessage = "无响应"
+                    return result
+                }
+
+                NSLog("[ModelProbe] Anthropic headers for %@: %@", model, http.allHeaderFields)
+
+                if http.statusCode == 429 {
+                    result.errorMessage = "已达上限"
+                    // Still try to parse rate limit headers from 429 response
+                    for (key, value) in http.allHeaderFields {
+                        let k = "\(key)".lowercased()
+                        if k == "anthropic-ratelimit-unified-5h-utilization",
+                           let v = Double("\(value)") {
+                            result.fiveHourUtilization = v
+                        }
+                        if k == "anthropic-ratelimit-unified-7d-utilization",
+                           let v = Double("\(value)") {
+                            result.sevenDayUtilization = v
+                        }
+                        if k == "anthropic-ratelimit-unified-5h-reset",
+                           let v = Double("\(value)") {
+                            result.fiveHourResetTime = Date(timeIntervalSince1970: v)
+                        }
+                        if k == "anthropic-ratelimit-unified-7d-reset",
+                           let v = Double("\(value)") {
+                            result.sevenDayResetTime = Date(timeIntervalSince1970: v)
+                        }
+                        if k == "anthropic-ratelimit-tokens-reset" {
+                            result.resetTime = Self.parseISO8601("\(value)")
+                        }
+                    }
+                    result.updatedAt = Date()
+                    return result
+                }
+
+                guard http.statusCode == 200 else {
+                    result.errorMessage = "HTTP \(http.statusCode)"
+                    return result
+                }
+
+                result.isAvailable = true
+
+                // Extract Anthropic rate limit headers
+                for (key, value) in http.allHeaderFields {
+                    let k = "\(key)".lowercased()
+                    if k == "anthropic-ratelimit-unified-5h-utilization",
+                       let v = Double("\(value)") {
+                        result.fiveHourUtilization = v
+                    }
+                    if k == "anthropic-ratelimit-unified-7d-utilization",
+                       let v = Double("\(value)") {
+                        result.sevenDayUtilization = v
+                    }
+                    if k == "anthropic-ratelimit-unified-5h-reset",
+                       let v = Double("\(value)") {
+                        result.fiveHourResetTime = Date(timeIntervalSince1970: v)
+                    }
+                    if k == "anthropic-ratelimit-unified-7d-reset",
+                       let v = Double("\(value)") {
+                        result.sevenDayResetTime = Date(timeIntervalSince1970: v)
+                    }
+                    if k == "anthropic-ratelimit-tokens-limit",
+                       let v = Int("\(value)") {
+                        result.tokensLimit = v
+                    }
+                    if k == "anthropic-ratelimit-tokens-remaining",
+                       let v = Int("\(value)") {
+                        result.tokensRemaining = v
+                    }
+                    if k == "anthropic-ratelimit-tokens-reset" {
+                        result.resetTime = Self.parseISO8601("\(value)")
+                    }
+                }
+
+                // Calculate token utilization from limit/remaining
+                if let limit = result.tokensLimit, let remaining = result.tokensRemaining, limit > 0 {
+                    result.tokenUtilization = 1.0 - (Double(remaining) / Double(limit))
+                }
+
+            case "openai-codex":
+                let statusOutput = try? await runCLI(arguments: ["status", "--usage"])
+
+                if let statusOutput {
+                    if let leftPercent5h = Self.parseLeftPercent(in: statusOutput, pattern: "5h:?\\s+(\\d+)%\\s+left") {
+                        result.fiveHourUtilization = 1.0 - (Double(leftPercent5h) / 100.0)
+                    }
+                    if let leftPercent7d = Self.parseLeftPercent(in: statusOutput, pattern: "Week:?\\s+(\\d+)%\\s+left") {
+                        result.sevenDayUtilization = 1.0 - (Double(leftPercent7d) / 100.0)
+                    }
+
+                    result.fiveHourResetTime = Self.parseStatusResetTime(
+                        in: statusOutput,
+                        pattern: "5h:.*?resets\\s+([0-9dhms\\s]+)"
+                    )
+                    result.sevenDayResetTime = Self.parseStatusResetTime(
+                        in: statusOutput,
+                        pattern: "Week:.*?resets\\s+([0-9dhms\\s]+)"
+                    )
+                }
+
+                result.isAvailable = true
+                result.errorMessage = nil
+                result.updatedAt = Date()
+                return result
+
+            case "openai":
+                guard let auth = Self.readAuthProfile(for: provider), let access = auth.access else {
+                    result.errorMessage = "无 OpenAI 凭证"
+                    return result
+                }
+                let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+
+                let body: [String: Any] = [
+                    "model": modelSlug,
+                    "max_tokens": 1,
+                    "messages": [["role": "user", "content": "."]]
+                ]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    result.errorMessage = "无响应"
+                    return result
+                }
+
+                NSLog("[ModelProbe] OpenAI headers for %@: %@", model, http.allHeaderFields)
+
+                if http.statusCode == 429 {
+                    result.errorMessage = "已达上限"
+                    // Try to parse rate limit headers from 429 response (OpenAI may not include them)
+                    if let limitTokStr = Self.headerValue(from: http, key: "x-ratelimit-limit-tokens"),
+                       let remainTokStr = Self.headerValue(from: http, key: "x-ratelimit-remaining-tokens"),
+                       let limitTok = Int(limitTokStr), let remainTok = Int(remainTokStr), limitTok > 0 {
+                        result.tokensLimit = limitTok
+                        result.tokensRemaining = remainTok
+                        result.tokenUtilization = 1.0 - (Double(remainTok) / Double(limitTok))
+                    }
+                    if let resetStr = Self.headerValue(from: http, key: "x-ratelimit-reset-tokens") {
+                        result.resetTime = Self.parseResetDuration(resetStr)
+                    }
+                    result.updatedAt = Date()
+                    return result
+                }
+
+                guard http.statusCode == 200 else {
+                    result.errorMessage = "HTTP \(http.statusCode)"
+                    return result
+                }
+
+                result.isAvailable = true
+
+                // Parse OpenAI rate limit headers
+                if let limitReqStr = Self.headerValue(from: http, key: "x-ratelimit-limit-requests"),
+                   let remainReqStr = Self.headerValue(from: http, key: "x-ratelimit-remaining-requests"),
+                   let limitReq = Double(limitReqStr), let remainReq = Double(remainReqStr), limitReq > 0 {
+                    result.requestUtilization = 1.0 - (remainReq / limitReq)
+                }
+                if let limitTokStr = Self.headerValue(from: http, key: "x-ratelimit-limit-tokens"),
+                   let remainTokStr = Self.headerValue(from: http, key: "x-ratelimit-remaining-tokens"),
+                   let limitTok = Int(limitTokStr), let remainTok = Int(remainTokStr), limitTok > 0 {
+                    result.tokensLimit = limitTok
+                    result.tokensRemaining = remainTok
+                    result.tokenUtilization = 1.0 - (Double(remainTok) / Double(limitTok))
+                }
+                if let resetStr = Self.headerValue(from: http, key: "x-ratelimit-reset-tokens") {
+                    result.resetTime = Self.parseResetDuration(resetStr)
+                }
+
+            case "minimax-portal":
+                guard let auth = Self.readAuthProfile(for: "minimax-portal"), let access = auth.access else {
+                    result.errorMessage = "无 MiniMax 凭证"
+                    return result
+                }
+                let url = URL(string: "https://api.minimax.chat/v1/text/chatcompletion_v2")!
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+
+                let body: [String: Any] = [
+                    "model": modelSlug,
+                    "max_tokens": 1,
+                    "messages": [["role": "user", "content": "."]]
+                ]
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                let (_, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    result.errorMessage = "无响应"
+                    return result
+                }
+
+                guard http.statusCode == 200 else {
+                    result.errorMessage = "HTTP \(http.statusCode)"
+                    return result
+                }
+
+                result.isAvailable = true
+
+            default:
+                // Unknown provider: fallback to Gateway proxy
+                result = await probeModelUsageViaGateway(model: model)
+                return result
+            }
+
+            result.updatedAt = Date()
+        } catch {
+            result.errorMessage = error.localizedDescription
+        }
+
+        return result
+    }
+
+    /// Fallback: probe via Gateway for unknown providers.
+    private func probeModelUsageViaGateway(model: String) async -> ModelUsageInfo {
+        var result = ModelUsageInfo()
+        do {
+            let url = baseURL.appendingPathComponent("v1/chat/completions")
+            var request = authorizedJSONRequest(url: url, method: "POST")
+            request.setValue("main", forHTTPHeaderField: "x-openclaw-agent-id")
+            request.setValue("agent:main:main", forHTTPHeaderField: "x-openclaw-session-key")
+
+            let body: [String: Any] = [
+                "model": model,
+                "max_tokens": 1,
+                "messages": [["role": "user", "content": "."]]
+            ]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let (_, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                result.errorMessage = "无响应"
+                return result
+            }
+
+            guard http.statusCode == 200 else {
+                result.errorMessage = "HTTP \(http.statusCode)"
+                return result
+            }
+
+            result.isAvailable = true
+            result.updatedAt = Date()
+        } catch {
+            result.errorMessage = error.localizedDescription
+        }
+        return result
     }
 
     // MARK: - Config File Update

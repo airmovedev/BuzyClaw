@@ -7,15 +7,42 @@ final class SkillsService {
     private(set) var isLoading = false
     private(set) var errorMessage: String?
 
+    private struct RuntimeCommand {
+        let executable: URL
+        let arguments: [String]
+    }
+
+    private static func resolveSkillsRuntimeCommand() -> RuntimeCommand {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
+            let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
+            if FileManager.default.fileExists(atPath: bundledNode.path)
+                && FileManager.default.fileExists(atPath: bundledOpenclaw.path)
+            {
+                return RuntimeCommand(
+                    executable: bundledNode,
+                    arguments: [bundledOpenclaw.path, "skills", "list", "--json"]
+                )
+            }
+        }
+
+        // Dev fallback
+        return RuntimeCommand(
+            executable: URL(fileURLWithPath: "/usr/local/bin/node"),
+            arguments: ["/usr/local/lib/node_modules/openclaw/openclaw.mjs", "skills", "list", "--json"]
+        )
+    }
+
     func loadSkills() async {
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
 
         do {
+            let command = Self.resolveSkillsRuntimeCommand()
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/node")
-            process.arguments = ["/usr/local/lib/node_modules/openclaw/openclaw.mjs", "skills", "list", "--json"]
+            process.executableURL = command.executable
+            process.arguments = command.arguments
             let pipe = Pipe()
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice

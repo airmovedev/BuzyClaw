@@ -136,8 +136,10 @@ final class GatewayManager {
 
     // MARK: - Process Lifecycle
 
-    /// Resolve node + openclaw paths. Prefers bundled runtime, falls back to system-installed (dev mode).
-    private static func resolveRuntimePaths() -> (node: URL, openclaw: URL, bundled: Bool) {
+    /// Resolve node + openclaw paths.
+    /// - freshInstall: requires bundled runtime (never falls back to system)
+    /// - existingInstall: prefers bundled runtime, allows system fallback for dev mode
+    private static func resolveRuntimePaths(for mode: GatewayMode) -> (node: URL, openclaw: URL, bundled: Bool)? {
         if let resourceURL = Bundle.main.resourceURL {
             let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
             let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
@@ -148,7 +150,12 @@ final class GatewayManager {
             }
             print("[Gateway] Bundled runtime NOT found. Tried: \(bundledNode.path) and \(bundledOpenclaw.path)")
         }
-        // Dev fallback
+
+        if mode == .freshInstall {
+            return nil
+        }
+
+        // Dev fallback (existing install mode only)
         return (
             URL(fileURLWithPath: "/usr/local/bin/node"),
             URL(fileURLWithPath: "/usr/local/bin/openclaw"),
@@ -219,11 +226,69 @@ final class GatewayManager {
         agentToAgent["enabled"] = agentToAgent["enabled"] ?? true
         agentToAgent["allow"] = agentToAgent["allow"] ?? ["*"]
         tools["agentToAgent"] = agentToAgent
+
+        // Ensure tools.profile is set (3.2 defaults to "messaging" which breaks cron/exec)
+        if tools["profile"] == nil {
+            tools["profile"] = "full"
+        }
+
         root["tools"] = tools
 
 
         if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: configFile, options: .atomic)
+        }
+
+        // Validate config after writing
+        let openclawPath: String? = {
+            // Prefer bundled runtime
+            if let resourceURL = Bundle.main.resourceURL {
+                let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
+                let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
+                if FileManager.default.fileExists(atPath: bundledNode.path)
+                    && FileManager.default.fileExists(atPath: bundledOpenclaw.path) {
+                    return bundledNode.path  // Will run: node openclaw.mjs config validate
+                }
+            }
+            // Fall back to system openclaw
+            for candidate in ["/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw"] {
+                if FileManager.default.fileExists(atPath: candidate) {
+                    return candidate
+                }
+            }
+            return nil
+        }()
+
+        if let openclawPath {
+            let validateProcess = Process()
+            let validatePipe = Pipe()
+            validateProcess.standardError = validatePipe
+
+            // Determine if we're using bundled node+mjs or system CLI
+            if openclawPath.hasSuffix("/node"), let resourceURL = Bundle.main.resourceURL {
+                let mjsPath = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs").path
+                validateProcess.executableURL = URL(fileURLWithPath: openclawPath)
+                validateProcess.arguments = [mjsPath, "config", "validate"]
+            } else {
+                validateProcess.executableURL = URL(fileURLWithPath: openclawPath)
+                validateProcess.arguments = ["config", "validate"]
+            }
+
+            validateProcess.environment = [
+                "HOME": configFile.deletingLastPathComponent().deletingLastPathComponent().path,
+                "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+            ]
+
+            do {
+                try validateProcess.run()
+                validateProcess.waitUntilExit()
+                if validateProcess.terminationStatus != 0 {
+                    let stderr = String(data: validatePipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    print("[Gateway] ⚠️ Config validation failed: \(stderr)")
+                }
+            } catch {
+                print("[Gateway] ⚠️ Config validation skipped: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -256,7 +321,10 @@ final class GatewayManager {
         // Future: migrate to ~/Library/Application Support/ClawTower/
 
         // Resolve runtime paths
-        let paths = Self.resolveRuntimePaths()
+        guard let paths = Self.resolveRuntimePaths(for: mode) else {
+            state = .error("Gateway 启动失败：fresh install 模式要求使用应用内置 OpenClaw runtime，但未找到 bundled runtime")
+            return
+        }
         Self.ensureExecutable(paths.node)
 
         if paths.bundled {
@@ -381,8 +449,34 @@ final class GatewayManager {
         process = proc
         pid = proc.processIdentifier
 
-        // Start health check loop
+        // Wait for gateway to become ready before starting periodic health checks
+        let ready = await waitForGatewayReady(port: port, token: authToken, timeout: 30)
+        if ready {
+            state = .running
+            restartCount = 0
+        }
+
+        // Start periodic health check loop (handles ongoing monitoring + crash recovery)
         startHealthCheck()
+    }
+
+    /// Polls the /health endpoint until the gateway responds with 200 or timeout is reached.
+    private func waitForGatewayReady(port: Int, token: String, timeout: TimeInterval = 30) async -> Bool {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeout {
+            guard state == .starting else { return false } // Process may have crashed
+            if let url = URL(string: "http://127.0.0.1:\(port)/health") {
+                var request = URLRequest(url: url, timeoutInterval: 2)
+                request.httpMethod = "GET"
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                if let (_, response) = try? await URLSession.shared.data(for: request),
+                   let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                    return true
+                }
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+        }
+        return false
     }
 
     private func terminateProcess() {

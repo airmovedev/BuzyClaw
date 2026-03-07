@@ -154,6 +154,12 @@ final class CloudKitMessageClient {
 
             await ensureZoneExists()
             startPolling()
+
+            // Register zone subscription for push-triggered fetch
+            Task {
+                await registerZoneSubscription()
+            }
+
             lastError = nil
         } catch {
             NSLog("[CloudKitMessage] Failed to start sync engine: %@", error.localizedDescription)
@@ -217,12 +223,11 @@ final class CloudKitMessageClient {
         do {
             try await database.save(record)
             if let idx = messages.firstIndex(where: { $0.id == message.id }) {
-                messages[idx].status = .delivered
+                messages[idx].status = .sent
             }
             NSLog("[iOS] ✅ CloudKit save SUCCESS for record %@ in zone %@", record.recordID.recordName, record.recordID.zoneID.zoneName)
             logger.info("✅ Message saved to CloudKit: \(message.id)")
             lastError = nil
-            isWaitingForReply = true
             saveLocalCache()
         } catch {
             NSLog("[iOS] ❌ CloudKit save FAILED: %@", error.localizedDescription)
@@ -277,12 +282,11 @@ final class CloudKitMessageClient {
         do {
             try await database.save(record)
             if let idx = messages.firstIndex(where: { $0.id == message.id }) {
-                messages[idx].status = .delivered
+                messages[idx].status = .sent
             }
             NSLog("[iOS] ✅ CloudKit save SUCCESS for record %@ in zone %@", record.recordID.recordName, record.recordID.zoneID.zoneName)
             logger.info("✅ Image message saved to CloudKit: \(message.id)")
             lastError = nil
-            isWaitingForReply = true
             saveLocalCache()
         } catch {
             NSLog("[iOS] ❌ CloudKit save FAILED: %@", error.localizedDescription)
@@ -312,10 +316,10 @@ final class CloudKitMessageClient {
         isSyncing = true
         defer { isSyncing = false }
 
-        // Always do full fetch (nil token) for reliability.
-        // Incremental tokens can miss records when CloudKit sync lags behind macOS writes.
-        directFetchChangeToken = nil
-        logger.info("pollForResponses: full fetch (token always nil for reliability)")
+        // Incremental fetch first; fall back to full fetch on token error.
+        // directFetchChangeToken is managed by fetchZoneChangesDirectly() callbacks.
+        // If token is nil (first run or after expiry), it naturally does a full fetch.
+        logger.info("pollForResponses: incremental fetch (token \(self.directFetchChangeToken != nil ? "present" : "nil/full"))")
         do {
             let newMessages = try await fetchZoneChangesDirectly()
             debugLastFetchTime = Date()
@@ -345,6 +349,10 @@ final class CloudKitMessageClient {
                     if let idx = messages.firstIndex(where: { $0.id == msg.id }) {
                         messages[idx].status = msg.status
                         didChange = true
+                        // macOS ACK'd received — it's now processing, show typing indicator
+                        if msg.status == .received {
+                            isWaitingForReply = true
+                        }
                     }
                 }
             }
@@ -636,6 +644,9 @@ final class CloudKitMessageClient {
                     if let idx = messages.firstIndex(where: { $0.id == msg.id }) {
                         messages[idx].status = msg.status
                         didChange = true
+                        if msg.status == .received {
+                            isWaitingForReply = true
+                        }
                     }
                 }
             }
@@ -682,6 +693,37 @@ final class CloudKitMessageClient {
 
         return await CKSyncEngine.RecordZoneChangeBatch(pendingChanges: filteredChanges) { _ in
             return nil
+        }
+    }
+
+    // MARK: - Zone subscription
+
+    private func registerZoneSubscription() async {
+        let subscriptionID = "clawtower-zone-changes"
+
+        // Check if subscription already exists
+        do {
+            _ = try await database.subscription(for: subscriptionID)
+            NSLog("[CloudKitMessage] Zone subscription already exists")
+            return
+        } catch {
+            // Subscription doesn't exist, create it
+        }
+
+        let subscription = CKRecordZoneSubscription(
+            zoneID: CloudKitConstants.zoneID,
+            subscriptionID: subscriptionID
+        )
+
+        let notificationInfo = CKSubscription.NotificationInfo()
+        notificationInfo.shouldSendContentAvailable = true  // Silent push
+        subscription.notificationInfo = notificationInfo
+
+        do {
+            try await database.save(subscription)
+            NSLog("[CloudKitMessage] ✅ Zone subscription registered")
+        } catch {
+            NSLog("[CloudKitMessage] ⚠️ Failed to register zone subscription: %@", error.localizedDescription)
         }
     }
 

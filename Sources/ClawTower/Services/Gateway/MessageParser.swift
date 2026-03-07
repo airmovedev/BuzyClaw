@@ -34,6 +34,10 @@ struct MessageParser {
             if trimmed.hasPrefix("[") && trimmed.contains("] A background task") { return true }
             // Config apply events
             if trimmed.contains("\"kind\":\"config-apply\"") || trimmed.contains("\"kind\": \"config-apply\"") { return true }
+            // 3.1+ subagent completion event (new format)
+            if trimmed.hasPrefix("[Internal task completion event]") { return true }
+            if trimmed.contains("OpenClaw runtime context (internal)") { return true }
+            if trimmed.contains("subagent task is ready for user delivery") { return true }
         }
         
         // 3. 新版结构化事件检测（兼容 3.1+）
@@ -100,6 +104,11 @@ struct MessageParser {
         let text = extractText(from: content)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // 3.1+ 新格式
+        if trimmed.hasPrefix("[Internal task completion event]") && trimmed.contains("source: subagent") { return true }
+        if trimmed.contains("OpenClaw runtime context (internal)") && trimmed.contains("subagent") { return true }
+        if trimmed.contains("subagent task is ready for user delivery") { return true }
+
         // 旧版：必须以 "A background task" 开头
         if trimmed.hasPrefix("A background task") && trimmed.contains("completed") { return true }
 
@@ -124,6 +133,19 @@ struct MessageParser {
             }
         }
         
+        // 1.5. 3.1+ 纯文本事件格式
+        let rawText = extractText(from: content)
+        if rawText.contains("[Internal task completion event]") || rawText.contains("OpenClaw runtime context (internal)") {
+            let lines = rawText.components(separatedBy: .newlines)
+            for line in lines {
+                let t = line.trimmingCharacters(in: .whitespaces)
+                if t.hasPrefix("task:") {
+                    let name = String(t.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                    if !name.isEmpty { return stripRolePrefix(String(name.prefix(60))) }
+                }
+            }
+        }
+
         let text = extractText(from: content)
         
         // 2. Queued announce 格式：定位到 "A background task" 那一行再提取

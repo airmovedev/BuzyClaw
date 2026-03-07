@@ -535,12 +535,15 @@ struct MobileMessageBubble: View {
                     ProgressView()
                         .controlSize(.mini)
                     Text("发送中")
-                case .delivered:
+                case .sent:
                     Image(systemName: "checkmark")
-                    Text("已送达")
-                case .read:
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("已读")
+                    Text("已发送")
+                case .received:
+                    Image(systemName: "checkmark")
+                    Image(systemName: "checkmark")
+                    Text("已接收")
+                case .delivered, .read:
+                    EmptyView()
                 }
             }
             .font(.caption2)

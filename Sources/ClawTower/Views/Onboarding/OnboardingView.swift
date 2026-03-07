@@ -12,6 +12,7 @@ struct OnboardingView: View {
     @State private var apiKeyInput = ""
     @State private var setupTokenInput = ""
     @State private var claudeAuthMethod = 0
+    @State private var minimaxAuthMethod = 0 // 0 = API Key, 1 = OAuth
 
     // Detection step state
     @State private var existingInstallDetected = false
@@ -468,40 +469,116 @@ struct OnboardingView: View {
     // MARK: - Step 5: Provider + Auth
 
     private var providerStep: some View {
-        VStack(spacing: 20) {
-            Text("连接你的 AI 大脑")
-                .font(.title2.bold())
-            Text("选择一个 AI 服务来连接")
-                .foregroundStyle(.secondary)
+        ScrollView {
+            VStack(spacing: 20) {
+                Text("连接你的 AI 大脑")
+                    .font(.title2.bold())
+                Text("选择一个 AI 服务来连接")
+                    .foregroundStyle(.secondary)
 
-            HStack(spacing: 16) {
-                providerCard(
-                    provider: .anthropic,
-                    name: "Claude",
-                    subtitle: "Anthropic",
-                    description: "最擅长写作和分析",
-                    icon: "brain.head.profile",
-                    tint: .purple
-                )
-                providerCard(
-                    provider: .openai,
-                    name: "ChatGPT",
-                    subtitle: "OpenAI",
-                    description: "最擅长代码和推理",
-                    icon: "bubble.left.and.bubble.right",
-                    tint: .green
-                )
-            }
+                let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
+                LazyVGrid(columns: columns, spacing: 16) {
+                    providerCard(
+                        provider: .anthropic,
+                        name: "Claude",
+                        subtitle: "Anthropic",
+                        description: "最擅长写作和分析",
+                        icon: "brain.head.profile",
+                        tint: .purple
+                    )
+                    providerCard(
+                        provider: .openai,
+                        name: "ChatGPT",
+                        subtitle: "OpenAI",
+                        description: "最擅长代码和推理",
+                        icon: "bubble.left.and.bubble.right",
+                        tint: .green
+                    )
+                    providerCard(
+                        provider: .minimax,
+                        name: "MiniMax",
+                        subtitle: "MiniMax",
+                        description: "国产大模型领先者",
+                        icon: "sparkles",
+                        tint: .orange
+                    )
+                    providerCard(
+                        provider: .kimi,
+                        name: "Kimi",
+                        subtitle: "Moonshot AI",
+                        description: "擅长长文本理解",
+                        icon: "moon.stars",
+                        tint: .blue
+                    )
+                    providerCard(
+                        provider: .zai,
+                        name: "智谱 GLM",
+                        subtitle: "Z.AI",
+                        description: "国产旗舰大模型",
+                        icon: "text.word.spacing",
+                        tint: .cyan
+                    )
+                    providerCard(
+                        provider: .qwen,
+                        name: "通义千问",
+                        subtitle: "Alibaba",
+                        description: "阿里巴巴大模型",
+                        icon: "cloud",
+                        tint: .indigo
+                    )
+                    providerCard(
+                        provider: .google,
+                        name: "Gemini",
+                        subtitle: "Google",
+                        description: "Google 旗舰大模型",
+                        icon: "globe",
+                        tint: .red
+                    )
+                    providerCard(
+                        provider: .xai,
+                        name: "Grok",
+                        subtitle: "xAI",
+                        description: "Elon Musk 的 AI",
+                        icon: "bolt",
+                        tint: .gray
+                    )
+                    providerCard(
+                        provider: .openrouter,
+                        name: "OpenRouter",
+                        subtitle: "多模型路由",
+                        description: "一个 Key 用所有模型",
+                        icon: "arrow.triangle.branch",
+                        tint: .mint
+                    )
+                }
 
-            if let provider = selectedProvider {
-                if provider == .anthropic {
-                    anthropicAuthSection
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                } else {
-                    oauthSection
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                if let provider = selectedProvider {
+                    Group {
+                        switch provider {
+                        case .anthropic:
+                            anthropicAuthSection
+                        case .openai:
+                            oauthSection
+                        case .minimax:
+                            minimaxAuthSection
+                        case .kimi:
+                            kimiAuthSection
+                        case .zai:
+                            genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan)
+                        case .qwen:
+                            genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo)
+                        case .google:
+                            genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red)
+                        case .xai:
+                            genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray)
+                        case .openrouter:
+                            genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
+            .padding(.vertical, 8)
         }
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
     }
@@ -711,6 +788,211 @@ struct OnboardingView: View {
                         .foregroundStyle(.secondary)
                 }
                 .font(.callout)
+            case .waitingForBrowser(let url):
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("请在浏览器中完成登录...")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.callout)
+
+                    Button("打开浏览器") {
+                        if let browserURL = URL(string: url) {
+                            NSWorkspace.shared.open(browserURL)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.green)
+                    .controlSize(.small)
+                }
+            case .waitingForCode:
+                EmptyView()
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("授权成功")
+                        .foregroundStyle(.green)
+                }
+                .font(.callout)
+            case .verifying:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("验证中...")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+
+                Button("重试") {
+                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            case .modelSelection:
+                EmptyView()
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
+    }
+
+    // MARK: - MiniMax Auth Section
+
+    private var minimaxAuthSection: some View {
+        VStack(spacing: 16) {
+            Picker("认证方式", selection: $minimaxAuthMethod) {
+                Text("API Key").tag(0)
+                Text("OAuth 登录").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .disabled(authService.isAuthenticated)
+            .onChange(of: minimaxAuthMethod) {
+                if !authService.isAuthenticated {
+                    authService.reset()
+                }
+            }
+
+            if minimaxAuthMethod == 0 {
+                minimaxKeyInputSection
+            } else {
+                minimaxOAuthSection
+            }
+        }
+    }
+
+    private var minimaxKeyInputSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("输入 MiniMax API Key：")
+                .font(.headline)
+
+            Text("在 platform.minimaxi.com 获取 API Key")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                TextField("粘贴你的 API Key", text: $apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(authService.isAuthenticated)
+
+                Button {
+                    let homeDir: String? = appState.gatewayMode == .freshInstall
+                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+                        : nil
+                    authService.persistMinimaxApiKey(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                } label: {
+                    switch authService.state {
+                    case .verifying:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 60)
+                    case .verified:
+                        Label("已验证", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    default:
+                        Text("验证")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(authService.isAuthenticated ? .green : .orange)
+                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
+            }
+
+            switch authService.state {
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("API Key 验证成功！点击「下一步」继续")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+            default:
+                EmptyView()
+            }
+
+            Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
+    }
+
+    private var minimaxOAuthSection: some View {
+        let oauthHomeDir: String? = appState.gatewayMode == .freshInstall
+            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+            : nil
+        return VStack(spacing: 16) {
+            switch authService.state {
+            case .idle:
+                Button("使用 MiniMax 账号登录") {
+                    authService.authenticateMinimaxOAuth(homeDir: oauthHomeDir)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            case .launching:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在请求授权...")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.callout)
+            case .waitingForCode(let url, let code):
+                VStack(spacing: 12) {
+                    Text("请在浏览器中输入以下代码完成授权")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+
+                    Text(code)
+                        .font(.system(size: 32, weight: .bold, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(Color(.textBackgroundColor))
+                        )
+
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("等待授权...")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.callout)
+
+                    Button("重新打开浏览器") {
+                        if let browserURL = URL(string: url) {
+                            NSWorkspace.shared.open(browserURL)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                    .controlSize(.small)
+                }
             case .waitingForBrowser(_):
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -743,11 +1025,209 @@ struct OnboardingView: View {
                 .font(.caption)
 
                 Button("重试") {
-                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
+                    authService.authenticateMinimaxOAuth(homeDir: oauthHomeDir)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.green)
+                .tint(.orange)
+            case .modelSelection:
+                EmptyView()
             }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
+    }
+
+    // MARK: - Kimi Auth Section
+
+    private var kimiAuthSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("输入 Moonshot API Key：")
+                .font(.headline)
+
+            Text("在 platform.moonshot.cn 获取 API Key")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 10) {
+                TextField("粘贴你的 API Key", text: $apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(authService.isAuthenticated)
+
+                Button {
+                    let homeDir: String? = appState.gatewayMode == .freshInstall
+                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+                        : nil
+                    authService.persistMoonshotApiKey(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                } label: {
+                    switch authService.state {
+                    case .verifying:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 60)
+                    case .verified:
+                        Label("已验证", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    default:
+                        Text("验证")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(authService.isAuthenticated ? .green : .blue)
+                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
+            }
+
+            switch authService.state {
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("API Key 验证成功！点击「下一步」继续")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+            default:
+                EmptyView()
+            }
+
+            Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.textBackgroundColor).opacity(0.5))
+        )
+    }
+
+    // MARK: - Generic API Key Auth Section
+
+    private func genericApiKeyAuthSection(provider: AuthService.Provider, providerName: String, consoleName: String, consoleURL: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("输入 \(providerName) API Key：")
+                .font(.headline)
+
+            HStack(spacing: 4) {
+                Text("在")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button {
+                    if let url = URL(string: consoleURL) {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text(consoleName)
+                        .font(.callout)
+                        .foregroundStyle(tint)
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                Text("获取 API Key")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                TextField("粘贴你的 API Key", text: $apiKeyInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .disabled(authService.isAuthenticated)
+
+                Button {
+                    let homeDir: String? = appState.gatewayMode == .freshInstall
+                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+                        : nil
+                    authService.persistGenericApiKey(provider: provider, apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                } label: {
+                    switch authService.state {
+                    case .verifying:
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 60)
+                    case .verified:
+                        Label("已验证", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    default:
+                        Text("验证")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(authService.isAuthenticated ? .green : tint)
+                .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
+            }
+
+            // Model selection for Qwen (after key verification)
+            if provider == .qwen && authService.state == .modelSelection {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("选择模型：")
+                        .font(.subheadline.bold())
+
+                    Picker("模型", selection: Binding(
+                        get: { authService.selectedModelId ?? "" },
+                        set: { authService.selectedModelId = $0 }
+                    )) {
+                        ForEach(authService.availableModels) { model in
+                            Text(model.displayName).tag(model.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    Button("确认") {
+                        guard let modelId = authService.selectedModelId else { return }
+                        let homeDir: String? = appState.gatewayMode == .freshInstall
+                            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
+                            : nil
+                        authService.persistQwenWithSelectedModel(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), modelId: modelId, homeDir: homeDir)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(tint)
+                }
+            }
+
+            switch authService.state {
+            case .verified:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("API Key 验证成功！点击「下一步」继续")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption)
+            case .modelSelection:
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.blue)
+                    Text("请选择要使用的模型")
+                        .foregroundStyle(.blue)
+                }
+                .font(.caption)
+            case .error(let message):
+                HStack(spacing: 6) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .foregroundStyle(.red)
+                }
+                .font(.caption)
+            default:
+                EmptyView()
+            }
+
+            Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
         .padding(16)
         .background(

@@ -9,9 +9,11 @@ enum MessageDirection: String, Sendable {
 
 /// Status of a CloudKit relay message
 enum MessageStatus: String, Sendable {
-    case pending
-    case delivered
-    case read
+    case pending    // 正在保存到 CloudKit
+    case sent       // CloudKit 保存成功（iOS 设置）
+    case received   // macOS 已接收，正在转发 Gateway（macOS 设置）
+    case delivered  // 回复已写回（macOS 设置）
+    case read       // 保留，未来用
 }
 
 /// A message record stored in CloudKit for iOS ↔ macOS relay

@@ -42,10 +42,13 @@ targets:
     preBuildScripts:
       - name: Prepare OpenClaw Runtime
         script: |
-          if [ "$CONFIGURATION" = "Release" ] || [ ! -f "$SRCROOT/Resources/runtime/openclaw/docs/reference/templates/AGENTS.md" ]; then
+          if [ "$CONFIGURATION" = "Release" ] \
+            || [ ! -f "$SRCROOT/Resources/runtime/openclaw/docs/reference/templates/AGENTS.md" ] \
+            || [ ! -f "$SRCROOT/Resources/runtime/openclaw.version" ] \
+            || [ "$(cat "$SRCROOT/Resources/runtime/openclaw.version" 2>/dev/null)" != "2026.3.2" ]; then
             "$SRCROOT/Scripts/prepare-runtime.sh"
           else
-            echo "⏭ Runtime looks complete, skipping sync (use Release build to force)"
+            echo "⏭ Runtime looks complete and pinned at 2026.3.2, skipping sync"
           fi
         basedOnDependencyAnalysis: false
     settings:
@@ -60,6 +63,7 @@ targets:
     dependencies:
       - package: Sparkle
         product: Sparkle
+      - package: MarkdownUI
 
   ClawTowerMobile:
     type: application
@@ -121,3 +125,6 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    from: "2.0.0"
