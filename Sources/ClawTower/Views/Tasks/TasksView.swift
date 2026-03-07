@@ -9,6 +9,7 @@ struct TasksView: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             taskColumn(status: .todo, title: "待办", color: .blue)
+            taskColumn(status: .inProgress, title: "进行中", color: .yellow)
             taskColumn(status: .inReview, title: "待审核", color: .purple)
             taskColumn(status: .done, title: "已完成", color: .green)
         }
@@ -34,13 +35,17 @@ struct TasksView: View {
     }
 
     private func taskColumn(status: TaskItem.Status, title: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let allForStatus = tasksForStatus(status)
+        let totalCount = allForStatus.count
+        let displayTasks: [TaskItem] = status == .done ? Array(allForStatus.prefix(10)) : allForStatus
+
+        return VStack(alignment: .leading, spacing: 8) {
             // 列标题
             HStack {
                 Circle().fill(color).frame(width: 8, height: 8)
                 Text(title)
                     .font(.title3.weight(.semibold))
-                Text("\(tasksForStatus(status).count)")
+                Text("\(totalCount)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
@@ -54,15 +59,31 @@ struct TasksView: View {
             // 任务卡片列表
             ScrollView {
                 LazyVStack(spacing: 8) {
-                    ForEach(tasksForStatus(status)) { task in
+                    ForEach(displayTasks) { task in
                         TaskCard(task: task) {
                             onOpenTaskContext(task.context)
                         } onMarkDone: {
                             Task { await manager.markTaskDone(taskID: task.id) }
                         }
+                        .draggable(task.id)
+                        .contextMenu {
+                            ForEach(TaskItem.Priority.allCases, id: \.self) { priority in
+                                Button {
+                                    Task { await manager.updateTaskPriority(taskID: task.id, newPriority: priority) }
+                                } label: {
+                                    Label(priority.title, systemImage: task.priority == priority ? "checkmark" : "")
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 4)
+            }
+            .dropDestination(for: String.self) { droppedIDs, _ in
+                for taskID in droppedIDs {
+                    Task { await manager.updateTaskStatus(taskID: taskID, newStatus: status) }
+                }
+                return true
             }
         }
         .frame(maxWidth: .infinity)

@@ -525,6 +525,33 @@ final class GatewayClient: Sendable {
         _ = try await toolsInvoke(tool: "cron", args: ["action": "remove", "jobId": jobId])
     }
 
+    func cronCreateJob(name: String, agentId: String, schedule: [String: Any], payload: [String: Any]) async throws {
+        var args: [String: Any] = [
+            "action": "add",
+            "name": name,
+            "agent": agentId,
+            "schedule": schedule,
+            "payload": payload
+        ]
+        _ = try await toolsInvoke(tool: "cron", args: args)
+    }
+
+    func cronJobRuns(jobId: String) async throws -> [[String: Any]] {
+        let json = try await toolsInvoke(tool: "cron", args: ["action": "runs", "jobId": jobId])
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? result
+        if let runs = details["runs"] as? [[String: Any]] { return runs }
+        if let runs = result["runs"] as? [[String: Any]] { return runs }
+        // Try parsing from content text
+        if let content = result["content"] as? [[String: Any]],
+           let firstItem = content.first,
+           let textStr = firstItem["text"] as? String,
+           let textData = textStr.data(using: .utf8),
+           let parsed = try? JSONSerialization.jsonObject(with: textData) as? [String: Any],
+           let runs = parsed["runs"] as? [[String: Any]] { return runs }
+        return []
+    }
+
     // MARK: - Agent Management
 
     /// Converts a string containing Chinese characters to pinyin.

@@ -10,9 +10,21 @@ struct SecondBrainView: View {
     @State private var errorMessage: String?
     @State private var dispatchSource: DispatchSourceFileSystemObject?
 
+    // Search
+    @State private var searchText: String = ""
+
+    // Category tabs
+    @State private var selectedCategory: String = "全部"
+
+    // Inline editing
+    @State private var isEditing = false
+    @State private var editingContent: String = ""
+
     let basePath: URL
 
     private var baseDir: URL { basePath }
+
+    private let categories = ["全部", "concepts", "daily-logs", "memory"]
 
     var body: some View {
         HSplitView {
@@ -30,11 +42,71 @@ struct SecondBrainView: View {
         }
     }
 
+    // MARK: - Filtered Documents
+
+    private var filteredDocuments: [SecondBrainDocument] {
+        var result = documents
+
+        // Filter by category
+        if selectedCategory != "全部" {
+            result = result.filter { $0.group == selectedCategory }
+        }
+
+        // Filter by search text
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if !query.isEmpty {
+            result = result.filter { doc in
+                doc.fileName.lowercased().contains(query) ||
+                doc.content.lowercased().contains(query)
+            }
+        }
+
+        return result
+    }
+
+    private var filteredGroupedDocuments: [DocumentGroup] {
+        let grouped = Dictionary(grouping: filteredDocuments, by: \.group)
+        return grouped.keys.sorted().map { key in
+            DocumentGroup(group: key, documents: grouped[key]!.sorted { $0.modifiedAt > $1.modifiedAt })
+        }
+    }
+
+    // MARK: - Search match snippet
+
+    private func matchSnippet(for document: SecondBrainDocument) -> String? {
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !query.isEmpty else { return nil }
+
+        // Search in content for a match
+        let content = document.content
+        let lowerContent = content.lowercased()
+        guard let range = lowerContent.range(of: query) else { return nil }
+
+        let matchStart = content.distance(from: content.startIndex, to: range.lowerBound)
+        let matchEnd = content.distance(from: content.startIndex, to: range.upperBound)
+
+        let snippetStart = max(0, matchStart - 30)
+        let snippetEnd = min(content.count, matchEnd + 30)
+
+        let startIdx = content.index(content.startIndex, offsetBy: snippetStart)
+        let endIdx = content.index(content.startIndex, offsetBy: snippetEnd)
+        var snippet = String(content[startIdx..<endIdx])
+
+        // Clean up newlines for display
+        snippet = snippet.replacingOccurrences(of: "\n", with: " ")
+
+        let prefix = snippetStart > 0 ? "…" : ""
+        let suffix = snippetEnd < content.count ? "…" : ""
+
+        return "\(prefix)\(snippet)\(suffix)"
+    }
+
     // MARK: - File List Panel
 
     @ViewBuilder
     private var fileListPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Title bar
             HStack {
                 Text("第二大脑")
                     .font(.largeTitle.bold())
@@ -45,6 +117,51 @@ struct SecondBrainView: View {
                 .help("刷新文件列表")
             }
             .padding()
+
+            // Search bar
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索文档…", text: $searchText)
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(8)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal)
+            .padding(.bottom, 8)
+
+            // Category tabs
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(categories, id: \.self) { category in
+                        Button {
+                            selectedCategory = category
+                        } label: {
+                            Text(category)
+                                .font(.caption.weight(selectedCategory == category ? .semibold : .regular))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(
+                                    selectedCategory == category ? AnyShapeStyle(.tint) : AnyShapeStyle(.quaternary),
+                                    in: Capsule()
+                                )
+                                .foregroundStyle(selectedCategory == category ? .white : .primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal)
+            }
+            .padding(.bottom, 8)
 
             Divider()
 
@@ -63,16 +180,23 @@ struct SecondBrainView: View {
                 } description: {
                     Text("~/.openclaw/workspace/second-brain/ 目录下没有 .md 文件")
                 }
+            } else if filteredDocuments.isEmpty {
+                ContentUnavailableView {
+                    Label("无匹配结果", systemImage: "magnifyingglass")
+                } description: {
+                    Text("没有找到匹配的文档")
+                }
             } else {
                 List(selection: Binding(
                     get: { selectedDocument?.id },
                     set: { id in
-                        if let id, let doc = documents.first(where: { $0.id == id }) {
+                        if let id, let doc = filteredDocuments.first(where: { $0.id == id }) {
+                            cancelEditing()
                             selectDocument(doc)
                         }
                     }
                 )) {
-                    ForEach(groupedDocuments, id: \.group) { group in
+                    ForEach(filteredGroupedDocuments, id: \.group) { group in
                         DisclosureGroup(
                             isExpanded: Binding(
                                 get: { expandedGroups.contains(group.group) },
@@ -80,8 +204,16 @@ struct SecondBrainView: View {
                             )
                         ) {
                             ForEach(group.documents) { doc in
-                                SecondBrainDocRow(document: doc)
-                                    .tag(doc.id)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    SecondBrainDocRow(document: doc)
+                                    if let snippet = matchSnippet(for: doc) {
+                                        Text(snippet)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .tag(doc.id)
                             }
                         } label: {
                             HStack(spacing: 6) {
@@ -100,7 +232,7 @@ struct SecondBrainView: View {
                 .listStyle(.sidebar)
                 .onAppear {
                     if expandedGroups.isEmpty {
-                        expandedGroups = Set(groupedDocuments.map(\.group))
+                        expandedGroups = Set(filteredGroupedDocuments.map(\.group))
                     }
                 }
             }
@@ -128,6 +260,27 @@ struct SecondBrainView: View {
                     }
                     Spacer()
 
+                    // Edit / Save / Cancel buttons (only for .md files)
+                    if !document.isImage {
+                        if isEditing {
+                            Button("取消") {
+                                cancelEditing()
+                            }
+
+                            Button("保存") {
+                                saveDocument()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        } else {
+                            Button {
+                                startEditing()
+                            } label: {
+                                Image(systemName: "pencil")
+                            }
+                            .help("编辑文档")
+                        }
+                    }
+
                     Button {
                         NSWorkspace.shared.activateFileViewerSelecting([document.filePath])
                     } label: {
@@ -139,10 +292,16 @@ struct SecondBrainView: View {
 
                 Divider()
 
-                ScrollView {
-                    if document.isImage {
+                if document.isImage {
+                    ScrollView {
                         imageContent(for: document)
-                    } else {
+                    }
+                } else if isEditing {
+                    TextEditor(text: $editingContent)
+                        .font(.body.monospaced())
+                        .padding(4)
+                } else {
+                    ScrollView {
                         Text(secondBrainMarkdown(document.content))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -182,6 +341,38 @@ struct SecondBrainView: View {
         } else {
             ContentUnavailableView("无法加载图片", systemImage: "photo.badge.exclamationmark")
                 .padding()
+        }
+    }
+
+    // MARK: - Editing
+
+    private func startEditing() {
+        guard let document = selectedDocument, !document.isImage else { return }
+        editingContent = document.content
+        isEditing = true
+    }
+
+    private func cancelEditing() {
+        isEditing = false
+        editingContent = ""
+    }
+
+    private func saveDocument() {
+        guard let document = selectedDocument else { return }
+        do {
+            try editingContent.write(to: document.filePath, atomically: true, encoding: .utf8)
+            // Update the selected document content
+            var updated = document
+            updated.content = editingContent
+            selectedDocument = updated
+            // Also update in the documents array
+            if let idx = documents.firstIndex(where: { $0.id == document.id }) {
+                documents[idx].content = editingContent
+            }
+            isEditing = false
+            editingContent = ""
+        } catch {
+            // Silently fail — could add alert later
         }
     }
 

@@ -7,6 +7,14 @@ struct ProjectItem: Identifiable, Hashable {
     let subdirectoryCount: Int
     let fileCount: Int
     let lastActivityAt: Date?
+    let knownSubdirs: Set<String> // e.g. ["pm", "design", "engineering"]
+}
+
+struct Milestone: Identifiable, Hashable, Codable {
+    var id: String { name + date }
+    let name: String
+    let date: String
+    let completed: Bool
 }
 
 struct ProjectSectionInfo: Hashable {

@@ -62,6 +62,22 @@ final class TaskManager {
         await saveTasks()
     }
 
+    func updateTaskStatus(taskID: String, newStatus: TaskItem.Status) async {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        guard tasks[index].status != newStatus else { return }
+        tasks[index].status = newStatus
+        tasks[index].updatedAt = Date()
+        await saveTasks()
+    }
+
+    func updateTaskPriority(taskID: String, newPriority: TaskItem.Priority) async {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        guard tasks[index].priority != newPriority else { return }
+        tasks[index].priority = newPriority
+        tasks[index].updatedAt = Date()
+        await saveTasks()
+    }
+
     func markTaskDone(taskID: String) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
         guard tasks[index].status != .done else { return }
