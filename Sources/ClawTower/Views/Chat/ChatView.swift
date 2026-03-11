@@ -401,12 +401,27 @@ struct ChatView: View {
                 let previousIds = Set(filteredLocal.map { $0.id })
                 let newMessages = sorted.filter { !previousIds.contains($0.id) }
 
-                // 检测新消息中的 sub-agent 完成通知
-                let hasCompletionNotice = newMessages.contains { msg in
-                    msg.isSystemInjected && msg.content.contains("just completed")
+                // 检测新消息中的 sub-agent 完成通知（兼容新旧格式）
+                let completionMessages = newMessages.filter { msg in
+                    MessageParser.isSubagentCompletion(role: msg.role.rawValue, content: msg.content, isSystemInjected: msg.isSystemInjected)
                 }
-                if hasCompletionNotice {
-                    appState.clearAllTrackedSubagents()
+                if !completionMessages.isEmpty {
+                    // 尝试从完成事件中提取 session_key，精确移除对应的 tracked subagent
+                    var extractedKeys = Set<String>()
+                    for msg in completionMessages {
+                        if let range = msg.content.range(of: "session_key: ") {
+                            let after = msg.content[range.upperBound...]
+                            let key = String(after.prefix(while: { !$0.isWhitespace && !$0.isNewline }))
+                            if !key.isEmpty {
+                                extractedKeys.insert(key)
+                            }
+                        }
+                    }
+                    if extractedKeys.isEmpty {
+                        appState.clearAllTrackedSubagents()
+                    } else {
+                        appState.removeTrackedSubagents(extractedKeys)
+                    }
                 }
                 // 有新消息时触发侧栏刷新
                 if !newMessages.isEmpty {
@@ -424,17 +439,36 @@ struct ChatView: View {
         if now.timeIntervalSince(lastUpdateTime) < 0.2 { return }
         lastUpdateTime = now
 
-        let filtered = messages.filter { !shouldHideInChat($0) }
-        displayMessages = filtered
-        // Update display content cache
+        var filtered: [ChatMessage] = []
         var newCache: [String: String] = [:]
-        for msg in filtered {
-            if let cached = displayContentCache[msg.id] {
-                newCache[msg.id] = cached
-            } else {
-                newCache[msg.id] = chatDisplayContent(msg)
+        filtered.reserveCapacity(messages.count)
+        newCache.reserveCapacity(messages.count)
+
+        for message in messages {
+            if message.isStreaming {
+                filtered.append(message)
+                newCache[message.id] = message.content
+                continue
             }
+            if message.isUser && !message.isSystemInjected {
+                filtered.append(message)
+                newCache[message.id] = message.content
+                continue
+            }
+            if message.isSystemInjected { continue }
+
+            let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed == "HEARTBEAT_OK" { continue }
+            if message.role == .assistant && message.content.contains("Stats: runtime") { continue }
+
+            let displayContent = displayContentCache[message.id] ?? chatDisplayContent(message)
+            if displayContent.isEmpty { continue }
+
+            filtered.append(message)
+            newCache[message.id] = displayContent
         }
+
+        displayMessages = filtered
         displayContentCache = newCache
         NSLog("🔥 [UpdateDisplay] took %.1fms, count: %d", (CFAbsoluteTimeGetCurrent() - updateStart) * 1000, displayMessages.count)
     }
@@ -935,6 +969,18 @@ private struct MessageBubble: View {
         !isLastMessage && message.isLong && !isExpanded
     }
 
+    private var renderedContent: String {
+        shouldTruncate ? String(effectiveContent.prefix(500)) + "..." : effectiveContent
+    }
+
+    private var shouldRenderAsPlainText: Bool {
+        Self.shouldRenderAsPlainText(
+            renderedContent,
+            isStreaming: message.isStreaming,
+            isTruncated: shouldTruncate
+        )
+    }
+
     private var isLeftAligned: Bool {
         !message.isUser || message.isSystemInjected
     }
@@ -968,6 +1014,26 @@ private struct MessageBubble: View {
             }
         }
         return paths
+    }
+
+    nonisolated private static func shouldRenderAsPlainText(_ content: String, isStreaming: Bool, isTruncated: Bool) -> Bool {
+        if isStreaming || isTruncated { return true }
+        if content.count > 4000 { return true }
+        if content.count > 1200 { return true }
+
+        let fencedCodeCount = content.components(separatedBy: "```").count - 1
+        if fencedCodeCount > 0 { return true }
+
+        let markdownSignals = ["#", "- ", "* ", "> ", "[", "](", "`", "1. ", "2. ", "3. "]
+        let markdownScore = markdownSignals.reduce(into: 0) { partialResult, signal in
+            partialResult += content.components(separatedBy: signal).count - 1
+        }
+        if markdownScore >= 12 { return true }
+
+        let newlineCount = content.components(separatedBy: "\n").count - 1
+        if newlineCount >= 18 { return true }
+
+        return false
     }
 
     var body: some View {
@@ -1045,20 +1111,18 @@ private struct MessageBubble: View {
     @ViewBuilder
     private var bubbleBody: some View {
         let showTruncateButton = !isLastMessage && message.isLong
-        let content = shouldTruncate ? String(effectiveContent.prefix(500)) + "..." : effectiveContent
+        let content = renderedContent
 
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .trailing, spacing: 4) {
                 if message.isStreaming && effectiveContent.isEmpty {
                     ThinkingIndicator()
                         .frame(maxWidth: .infinity, alignment: .leading)
-                } else if message.isStreaming || content.count > 4000 {
-                    // 长文本降级到 Text 避免性能问题
+                } else if shouldRenderAsPlainText {
                     Text(content)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    // 使用 MarkdownUI 渲染
                     Markdown(content)
                         .markdownTheme(.basic)
                         .markdownTextStyle {
