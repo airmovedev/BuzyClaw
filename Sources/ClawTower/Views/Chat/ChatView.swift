@@ -1063,8 +1063,13 @@ private struct MessageBubble: View {
         !isLastMessage && message.isLong && !isExpanded
     }
 
+    private static let truncatedPreviewLength = 280
+    private static let longTextSelectionThreshold = 300
+    private static let copyButtonThreshold = 280
+    private static let ultraLongAssistantPlainTextThreshold = 2000
+
     private var renderedContent: String {
-        shouldTruncate ? String(effectiveContent.prefix(500)) + "..." : effectiveContent
+        shouldTruncate ? String(effectiveContent.prefix(Self.truncatedPreviewLength)) + "..." : effectiveContent
     }
 
     private var shouldRenderAsPlainText: Bool {
@@ -1143,6 +1148,21 @@ private struct MessageBubble: View {
 
     private var isPerfRisky: Bool {
         message.content.count >= Self.riskyContentLengthThreshold || shouldTruncate || shouldRenderAsPlainText
+    }
+
+    private var disablesTextSelection: Bool {
+        message.content.count > Self.longTextSelectionThreshold || shouldRenderAsPlainText
+    }
+
+    private var shouldShowCopyButton: Bool {
+        message.isAssistant && !message.isStreaming && message.content.count <= Self.copyButtonThreshold && !shouldTruncate
+    }
+
+    private var shouldUseMinimalAssistantBubbleStyle: Bool {
+        message.isAssistant
+            && shouldRenderAsPlainText
+            && message.content.count >= Self.ultraLongAssistantPlainTextThreshold
+            && !message.isStreaming
     }
 
     private func perfLog(_ message: String) {
@@ -1244,17 +1264,31 @@ private struct MessageBubble: View {
                     ThinkingIndicator()
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else if shouldRenderAsPlainText {
-                    Text(content)
-                        .textSelection(.enabled)
+                    let plainTextView = Text(content)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if disablesTextSelection {
+                        plainTextView
+                            .textSelection(.disabled)
+                    } else {
+                        plainTextView
+                            .textSelection(.enabled)
+                    }
                 } else {
-                    Markdown(content)
+                    let markdownView = Markdown(content)
                         .markdownTheme(.basic)
                         .markdownTextStyle {
                             FontSize(.em(0.85))
                         }
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if disablesTextSelection {
+                        markdownView
+                            .textSelection(.disabled)
+                    } else {
+                        markdownView
+                            .textSelection(.enabled)
+                    }
                 }
 
                 if showTruncateButton {
@@ -1283,10 +1317,13 @@ private struct MessageBubble: View {
                                 pulseOpacity = 1.0
                             }
                         }
+                } else if !shouldUseMinimalAssistantBubbleStyle {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Color.primary.opacity(0.04), lineWidth: 0.5)
                 }
             }
 
-            if message.isAssistant {
+            if shouldShowCopyButton {
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(message.content, forType: .string)
