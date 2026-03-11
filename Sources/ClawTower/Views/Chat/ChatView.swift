@@ -1070,9 +1070,7 @@ private struct MessageBubble: View {
 
     private static let previewOnlyCharacterLimit = 140
     private static let previewOnlyLineLimit = 5
-    private static let truncatedPreviewLength = 280
     private static let longTextSelectionThreshold = 300
-    private static let copyButtonThreshold = 280
     private static let ultraLongAssistantPlainTextThreshold = 2000
 
     private var previewOnlyContent: String {
@@ -1080,18 +1078,11 @@ private struct MessageBubble: View {
     }
 
     private var renderedContent: String {
-        if shouldUsePreviewOnlyRendering {
-            return previewOnlyContent
-        }
-        return shouldTruncate ? String(effectiveContent.prefix(Self.truncatedPreviewLength)) + "..." : effectiveContent
+        shouldUsePreviewOnlyRendering ? previewOnlyContent : effectiveContent
     }
 
     private var shouldRenderAsPlainText: Bool {
-        Self.shouldRenderAsPlainText(
-            renderedContent,
-            isStreaming: message.isStreaming,
-            isTruncated: shouldTruncate
-        )
+        false
     }
 
     private var isLeftAligned: Bool {
@@ -1109,24 +1100,34 @@ private struct MessageBubble: View {
             "~/[^\\s`\\)\\]>\"']+",
             "/Users/[^\\s`\\)\\]>\"']+",
         ]
-        var paths: [String] = []
-        var seen = Set<String>()
+        var orderedPaths: [String] = []
+        var seenNormalizedPaths = Set<String>()
+
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
             for match in matches {
                 guard let range = Range(match.range, in: text) else { continue }
-                var path = String(text[range])
-                // Strip trailing punctuation
-                while let last = path.last, ".,:;!?`'\")}]>".contains(last) {
-                    path.removeLast()
+                var rawPath = String(text[range])
+                while let last = rawPath.last, ".,:;!?`'\")}]>".contains(last) {
+                    rawPath.removeLast()
                 }
-                if !path.isEmpty && seen.insert(path).inserted {
-                    paths.append(path)
+                guard !rawPath.isEmpty else { continue }
+
+                let normalizedPath = normalizedPathKey(for: rawPath)
+                if seenNormalizedPaths.insert(normalizedPath).inserted {
+                    orderedPaths.append(rawPath)
                 }
             }
         }
-        return paths
+
+        return orderedPaths
+    }
+
+    nonisolated private static func normalizedPathKey(for path: String) -> String {
+        let expandedPath = (path as NSString).expandingTildeInPath
+        let standardizedPath = URL(fileURLWithPath: expandedPath).standardizedFileURL.path
+        return standardizedPath
     }
 
     nonisolated fileprivate static func shouldUsePreviewOnlyRendering(for message: ChatMessage, isExpanded: Bool, isLastMessage: Bool) -> Bool {
@@ -1191,7 +1192,7 @@ private struct MessageBubble: View {
     }
 
     private var shouldShowCopyButton: Bool {
-        message.isAssistant && !message.isStreaming && message.content.count <= Self.copyButtonThreshold && !shouldTruncate && !shouldUsePreviewOnlyRendering
+        !message.isStreaming
     }
 
     private var shouldUseMinimalAssistantBubbleStyle: Bool {
@@ -1217,10 +1218,8 @@ private struct MessageBubble: View {
                     FlowLayout(spacing: 6) {
                         ForEach(detectedPaths, id: \.self) { path in
                             Button {
-                                let expanded = path.hasPrefix("~/")
-                                    ? FileManager.default.homeDirectoryForCurrentUser.path + String(path.dropFirst(1))
-                                    : path
-                                NSWorkspace.shared.open(URL(fileURLWithPath: expanded))
+                                let normalizedPath = Self.normalizedPathKey(for: path)
+                                NSWorkspace.shared.open(URL(fileURLWithPath: normalizedPath))
                             } label: {
                                 HStack(spacing: 3) {
                                     Image(systemName: "folder")
