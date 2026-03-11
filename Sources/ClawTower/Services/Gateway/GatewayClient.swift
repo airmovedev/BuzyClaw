@@ -122,36 +122,30 @@ final class GatewayClient: Sendable {
         let json = try await toolsInvoke(tool: "agents_list")
         let result = json["result"] as? [String: Any] ?? json
         let details = result["details"] as? [String: Any] ?? result
-        let agents = details["agents"] as? [[String: Any]]
+        var runtimeAgents = details["agents"] as? [[String: Any]]
             ?? result["agents"] as? [[String: Any]]
             ?? []
-        // 从 openclaw.json 补全 identity 信息
+
+        let configForWorkspace = Self.loadPreferredConfig()
+        let configAgents = Self.configAgentList(from: configForWorkspace)
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = home.appendingPathComponent(".openclaw/openclaw.json")
-        var identityMap: [String: (name: String?, emoji: String?)] = [:]
-        if let configData = try? Data(contentsOf: configURL),
-           let config = try? JSONSerialization.jsonObject(with: configData) as? [String: Any],
-           let agentsConfig = config["agents"] as? [String: Any],
-           let agentsList = agentsConfig["list"] as? [[String: Any]] {
-            for agentConf in agentsList {
-                guard let agentId = agentConf["id"] as? String else { continue }
-                if let identity = agentConf["identity"] as? [String: Any] {
-                    identityMap[agentId.lowercased()] = (
-                        name: identity["name"] as? String,
-                        emoji: identity["emoji"] as? String
-                    )
-                }
-            }
+
+        let runtimeIDs = Set(runtimeAgents.compactMap { ($0["id"] as? String)?.lowercased() })
+        for configAgent in configAgents {
+            guard let id = configAgent["id"] as? String, !runtimeIDs.contains(id.lowercased()) else { continue }
+            runtimeAgents.append(configAgent)
         }
 
-        // Read config once for workspace lookups
-        let configForWorkspace: [String: Any]? = {
-            if let data = try? Data(contentsOf: configURL),
-               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                return config
+        var identityMap: [String: (name: String?, emoji: String?)] = [:]
+        for agentConf in configAgents {
+            guard let agentId = agentConf["id"] as? String else { continue }
+            if let identity = agentConf["identity"] as? [String: Any] {
+                identityMap[agentId.lowercased()] = (
+                    name: identity["name"] as? String,
+                    emoji: identity["emoji"] as? String
+                )
             }
-            return nil
-        }()
+        }
 
         let defaultModel: String = {
             if let agentsConfig = configForWorkspace?["agents"] as? [String: Any],
@@ -163,7 +157,7 @@ final class GatewayClient: Sendable {
             return "anthropic/claude-sonnet-4-20250514"
         }()
 
-        return agents.map { dict in
+        return runtimeAgents.map { dict in
             let id = dict["id"] as? String ?? ""
             let identity = dict["identity"] as? [String: Any]
             let configIdentity = identityMap[id.lowercased()]
@@ -256,6 +250,7 @@ final class GatewayClient: Sendable {
                 displayName: dict["displayName"] as? String,
                 updatedAt: updatedAt,
                 model: dict["model"] as? String,
+                status: dict["status"] as? String,
                 totalTokens: dict["totalTokens"] as? Int ?? 0
             )
         }
@@ -1205,11 +1200,9 @@ final class GatewayClient: Sendable {
     // MARK: - Config File Update
 
     func updateAgentModel(agentId: String, model: String) async throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let configPath = "\(home)/.openclaw/openclaw.json"
-        let url = URL(fileURLWithPath: configPath)
-        let data = try Data(contentsOf: url)
-        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let url = Self.preferredConfigURL(),
+              let data = try? Data(contentsOf: url),
+              var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               var agents = json["agents"] as? [String: Any],
               var list = agents["list"] as? [[String: Any]] else {
             throw GatewayError.badResponse
@@ -1223,6 +1216,64 @@ final class GatewayClient: Sendable {
             try newData.write(to: url)
             NSLog("[ClawTower] Updated model for agent %@ to %@", agentId, model)
         }
+    }
+
+    private static func preferredConfigURL() -> URL? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent("Library/Application Support/ClawTower/.openclaw/openclaw.json"),
+            home.appendingPathComponent(".openclaw/openclaw.json")
+        ]
+
+        var bestURL: URL?
+        var bestScore = -1
+        for url in candidates {
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let score = configAgentList(from: json).count * 100 + configModelCount(from: json)
+            if score > bestScore {
+                bestScore = score
+                bestURL = url
+            }
+        }
+        return bestURL
+    }
+
+    private static func loadPreferredConfig() -> [String: Any]? {
+        guard let url = preferredConfigURL(),
+              let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json
+    }
+
+    private static func configAgentList(from json: [String: Any]?) -> [[String: Any]] {
+        guard let json,
+              let agentsConfig = json["agents"] as? [String: Any],
+              let agentsList = agentsConfig["list"] as? [[String: Any]] else {
+            return []
+        }
+        return agentsList
+    }
+
+    private static func configModelCount(from json: [String: Any]) -> Int {
+        var count = 0
+        if let agents = json["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let models = defaults["models"] as? [String: Any] {
+            count += models.count
+        }
+        if let models = json["models"] as? [String: Any],
+           let providers = models["providers"] as? [String: Any] {
+            for value in providers.values {
+                if let dict = value as? [String: Any] {
+                    count += (dict["models"] as? [[String: Any]])?.count ?? 0
+                    count += (dict["models"] as? [String])?.count ?? 0
+                }
+            }
+        }
+        return count
     }
 
     enum GatewayError: Error, LocalizedError {

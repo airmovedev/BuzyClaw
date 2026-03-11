@@ -394,10 +394,7 @@ struct SettingsView: View {
     }
 
     private func detectAuthProfiles() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configPath = home.appendingPathComponent(".openclaw/openclaw.json").path
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let json = loadOpenClawConfig(),
               let auth = json["auth"] as? [String: Any],
               let profiles = auth["profiles"] as? [String: Any],
               !profiles.isEmpty else {
@@ -421,10 +418,7 @@ struct SettingsView: View {
         var models: [DetectedModel] = []
         var providersWithModels = Set<String>()
 
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configPath = home.appendingPathComponent(".openclaw/openclaw.json").path
-        let configData = try? Data(contentsOf: URL(fileURLWithPath: configPath))
-        let configJson = configData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let configJson = loadOpenClawConfig()
 
         if let json = configJson,
            let modelsConfig = json["models"] as? [String: Any],
@@ -516,9 +510,7 @@ struct SettingsView: View {
     }
 
     private func loadToolsProfile() {
-        let configPath = appState.openclawBasePath.appendingPathComponent("openclaw.json")
-        guard let data = try? Data(contentsOf: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let json = loadOpenClawConfig(),
               let tools = json["tools"] as? [String: Any],
               let profile = tools["profile"] as? String else { return }
         currentToolsProfile = profile
@@ -540,9 +532,7 @@ struct SettingsView: View {
     }
 
     private func loadSessionVisibility() {
-        let configPath = appState.openclawBasePath.appendingPathComponent("openclaw.json")
-        guard let data = try? Data(contentsOf: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let json = loadOpenClawConfig(),
               let tools = json["tools"] as? [String: Any],
               let sessions = tools["sessions"] as? [String: Any],
               let rawValue = sessions["visibility"] as? String,
@@ -577,5 +567,20 @@ struct SettingsView: View {
         isRestartingGateway = true
         await appState.restartGateway()
         isRestartingGateway = false
+    }
+
+    private func loadOpenClawConfig() -> [String: Any]? {
+        let candidates = [
+            appState.openclawBasePath.appendingPathComponent("openclaw.json"),
+            FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/openclaw.json")
+        ]
+
+        for path in candidates {
+            guard let data = try? Data(contentsOf: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            return json
+        }
+
+        return nil
     }
 }

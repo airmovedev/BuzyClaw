@@ -79,18 +79,48 @@ enum CronExpressionFormatter {
 
 enum CronJobParser {
     static func parse(from data: Data) -> [CronJob] {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = json["result"] as? [String: Any],
-              let details = result["details"] as? [String: Any],
-              let jobs = details["jobs"] as? [[String: Any]] else {
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [String: Any],
-                  let jobs = result["jobs"] as? [[String: Any]] else {
-                return []
-            }
-            return jobs.compactMap(parseJob)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return []
         }
-        return jobs.compactMap(parseJob)
+
+        let result = json["result"] as? [String: Any] ?? json
+        let details = result["details"] as? [String: Any] ?? [:]
+
+        let jobContainers: [Any?] = [
+            details["jobs"],
+            details["items"],
+            result["jobs"],
+            result["items"],
+            json["jobs"],
+            json["items"]
+        ]
+
+        for container in jobContainers {
+            if let jobs = parseJobsArray(container) {
+                return jobs
+            }
+        }
+
+        if let content = result["content"] as? [[String: Any]] {
+            for block in content {
+                guard let text = block["text"] as? String,
+                      let textData = text.data(using: .utf8),
+                      let nested = try? JSONSerialization.jsonObject(with: textData) as? [String: Any] else { continue }
+                if let jobs = parseJobsArray(nested["jobs"]) ?? parseJobsArray(nested["items"]) {
+                    return jobs
+                }
+                if let nestedResult = nested["result"] as? [String: Any],
+                   let jobs = parseJobsArray(nestedResult["jobs"]) ?? parseJobsArray(nestedResult["items"]) {
+                    return jobs
+                }
+            }
+        }
+
+        return []
+    }
+    private static func parseJobsArray(_ value: Any?) -> [CronJob]? {
+        guard let array = value as? [[String: Any]] else { return nil }
+        return array.compactMap(parseJob)
     }
 
     private static func parseJob(_ dict: [String: Any]) -> CronJob? {
