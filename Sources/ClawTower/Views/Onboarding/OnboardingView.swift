@@ -83,7 +83,7 @@ struct OnboardingView: View {
             VStack(spacing: 0) {
                 headerSection
 
-                Spacer(minLength: 24)
+                Spacer(minLength: 16)
 
                 Group {
                     switch currentStep {
@@ -102,27 +102,27 @@ struct OnboardingView: View {
                 }
                 .frame(maxWidth: 720, maxHeight: .infinity, alignment: .top)
 
-                Spacer(minLength: 24)
+                Spacer(minLength: 16)
 
                 navigationSection
             }
             .padding(.horizontal, 36)
-            .padding(.vertical, 28)
+            .padding(.vertical, 24)
         }
         .frame(minWidth: 760, minHeight: 640)
     }
 
     private var headerSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(stepEyebrow)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.secondary)
                     Text(stepTitle)
-                        .font(.system(size: 30, weight: .bold))
+                        .font(.system(size: 28, weight: .bold))
                     Text(stepSubtitle)
-                        .font(.system(size: 15))
+                        .font(.system(size: 14))
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 24)
@@ -553,26 +553,31 @@ struct OnboardingView: View {
     private var userInfoStep: some View {
         ScrollView {
             onboardingCard {
-                VStack(alignment: .leading, spacing: 26) {
+                VStack(alignment: .leading, spacing: 18) {
                     sectionIntro(title: "让 BuzyClaw 更懂你", description: "不用填很多，只把影响协作体验的关键信息告诉它。")
 
-                    VStack(alignment: .leading, spacing: 14) {
-                        fieldLabel("希望怎么称呼你")
-                        largeTextField("助手该怎么称呼你？", text: $userName)
-                    }
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        fieldLabel("作息习惯")
-                        Picker("作息习惯", selection: $selectedSchedule) {
-                            Text("🌅 早起型").tag("早起")
-                            Text("🌙 夜猫子").tag("夜猫")
-                            Text("⏰ 正常作息").tag("正常")
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            fieldLabel("希望怎么称呼你")
+                            largeTextField("助手该怎么称呼你？", text: $userName)
                         }
-                        .pickerStyle(.segmented)
-                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            fieldLabel("作息习惯")
+                            Picker("作息习惯", selection: $selectedSchedule) {
+                                Text("🌅 早起型").tag("早起")
+                                Text("🌙 夜猫子").tag("夜猫")
+                                Text("⏰ 正常作息").tag("正常")
+                            }
+                            .pickerStyle(.segmented)
+                            .controlSize(.large)
+                            .frame(height: 50)
+                        }
+                        .frame(maxWidth: .infinity)
                     }
 
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
                         fieldLabel("职业 / 身份")
                         tagGrid(
                             options: ["独立开发者", "产品经理", "设计师", "学生", "创业者", "自由职业", "上班族", "内容创作者"],
@@ -590,7 +595,7 @@ struct OnboardingView: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
                         fieldLabel("你最常用 BuzyClaw 做什么（至少选 1 个）")
                         tagGrid(
                             options: ["💻 编程开发", "📝 写作内容", "🔍 研究分析", "📅 日程管理", "📋 项目管理", "🧠 知识管理", "🎨 创意设计", "💬 日常助手"],
@@ -605,8 +610,8 @@ struct OnboardingView: View {
     }
 
     private func tagGrid(options: [String], selected: Binding<Set<String>>) -> some View {
-        let columns = [GridItem(.adaptive(minimum: 144), spacing: 12)]
-        return LazyVGrid(columns: columns, spacing: 12) {
+        let columns = [GridItem(.adaptive(minimum: 144), spacing: 8)]
+        return LazyVGrid(columns: columns, spacing: 8) {
             ForEach(options, id: \.self) { option in
                 let isSelected = selected.wrappedValue.contains(option)
                 Button {
@@ -627,9 +632,9 @@ struct OnboardingView: View {
                                 .foregroundStyle(Color.accentColor)
                         }
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 48)
+                    .frame(height: 40)
                     .background(selectionBackground(isSelected))
                 }
                 .buttonStyle(.plain)
@@ -642,17 +647,17 @@ struct OnboardingView: View {
     private var providerStep: some View {
         ScrollView {
             onboardingCard {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 16) {
                     sectionIntro(title: "选一个最顺手的 AI 大脑", description: "先选模型，再在同一页完成认证。逻辑不变，只是把信息整理得更不乱。")
 
-                    VStack(spacing: 12) {
+                    VStack(spacing: 6) {
                         ForEach(providerOptions) { option in
                             providerRow(option)
                         }
                     }
 
                     if let provider = selectedProvider {
-                        VStack(alignment: .leading, spacing: 14) {
+                        VStack(alignment: .leading, spacing: 12) {
                             Text("\(selectedProviderName) 认证")
                                 .font(.title3.bold())
 
@@ -753,14 +758,14 @@ struct OnboardingView: View {
     }
 
     private func authMethodGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(20)
+        .padding(16)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -1486,7 +1491,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             content()
         }
-        .padding(32)
+        .padding(28)
         .frame(maxWidth: width, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .overlay(
@@ -1549,8 +1554,8 @@ struct OnboardingView: View {
     private func selectionRow<Content: View>(isSelected: Bool, disabled: Bool = false, action: @escaping () -> Void, @ViewBuilder content: () -> Content) -> some View {
         Button(action: action) {
             content()
-                .padding(.horizontal, 18)
-                .padding(.vertical, 16)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(selectionBackground(isSelected))
         }
@@ -1642,18 +1647,19 @@ struct OnboardingView: View {
                 case .verifying:
                     ProgressView()
                         .controlSize(.small)
-                        .frame(width: 84, height: 46)
+                        .frame(width: 84)
                 case .verified:
                     Label("已验证", systemImage: "checkmark.circle.fill")
-                        .frame(width: 112, height: 46)
+                        .frame(width: 112)
                 default:
                     Text("验证")
-                        .frame(width: 92, height: 46)
+                        .frame(width: 92)
                 }
             }
             .buttonStyle(.borderedProminent)
             .tint(isAuthenticated ? .green : tint)
             .controlSize(.large)
+            .frame(height: 50)
             .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || currentAuthState == .verifying || isAuthenticated)
         }
     }
