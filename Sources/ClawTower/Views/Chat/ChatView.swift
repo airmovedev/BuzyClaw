@@ -1142,20 +1142,13 @@ private struct MessageBubble: View {
         if path.hasSuffix("/") { return false }
 
         let allowedExtensions: Set<String> = [
-            // Documents
+            // Office / document artifacts
             "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
             "pages", "numbers", "keynote", "rtf", "odt", "ods", "odp",
-            "csv", "tsv", "txt",
-            // Images
+            "csv", "tsv", "epub",
+            // Image artifacts
             "png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
-            "tiff", "tif", "bmp", "ico", "svg",
-            // Audio/Video
-            "mp3", "mp4", "m4a", "m4v", "mov", "wav", "aac", "flac",
-            "avi", "mkv", "webm",
-            // Archives
-            "zip", "tar", "gz", "dmg", "pkg",
-            // Other artifacts
-            "html", "epub",
+            "tiff", "tif", "bmp", "svg"
         ]
 
         return allowedExtensions.contains(ext)
@@ -1245,9 +1238,8 @@ private struct MessageBubble: View {
             VStack(alignment: isLeftAligned ? .leading : .trailing, spacing: 4) {
                 bubbleBody
 
-                if !detectedPaths.isEmpty {
-                    let openablePaths = detectedPaths.filter { Self.shouldShowOpenButton(for: $0) }
-                    if !openablePaths.isEmpty {
+                let openablePaths = detectedPaths.filter(Self.shouldShowOpenButton(for:))
+                if !openablePaths.isEmpty {
                     FlowLayout(spacing: 6) {
                         ForEach(openablePaths, id: \.self) { path in
                             Button {
@@ -1255,7 +1247,7 @@ private struct MessageBubble: View {
                                 NSWorkspace.shared.open(URL(fileURLWithPath: normalizedPath))
                             } label: {
                                 HStack(spacing: 3) {
-                                    Image(systemName: "folder")
+                                    Image(systemName: "doc")
                                         .font(.caption2)
                                     Text("打开")
                                         .font(.caption2)
@@ -1268,7 +1260,6 @@ private struct MessageBubble: View {
                             .buttonStyle(.plain)
                             .help(path)
                         }
-                    }
                     }
                 }
 //
