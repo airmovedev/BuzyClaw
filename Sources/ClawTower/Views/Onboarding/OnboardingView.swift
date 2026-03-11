@@ -189,11 +189,14 @@ struct OnboardingView: View {
                 }
             }
         }
+        .frame(maxWidth: 760)
+        .padding(.vertical, 4)
+        .background(Color.clear)
     }
 
     private var stepEyebrow: String {
         switch currentStep {
-        case 0: return "欢迎使用 BuzyClaw"
+        case 0: return "欢迎使用 虾忙"
         case 1: return "环境检测"
         case 2: return "角色设定"
         case 3: return "协作风格"
@@ -229,11 +232,11 @@ struct OnboardingView: View {
         case 1: return "如果已经装过 OpenClaw，我们会尽量复用现有配置，少折腾一次。"
         case 2: return "名字和形象会影响之后的默认人设，但不影响能力，后面随时都能再改。"
         case 3: return "统一好表达方式、主动程度和提醒风格，后面日常协作会顺手很多。"
-        case 4: return "让 BuzyClaw 了解你的称呼、作息和使用重点，后面给出的建议会更贴身。"
+        case 4: return "让 虾忙 了解你的称呼、作息和使用重点，后面给出的建议会更贴身。"
         case 5: return "先把大脑接上。你可以选熟悉的模型服务，流程不变，只把呈现方式做得更清楚。"
         case 6: return "技能就是可插拔能力。先装常用的，之后也能在设置里继续增减。"
         case 7: return "工具越多，行动能力越强；范围越小，边界越保守。按你的习惯来。"
-        case 8: return "这些权限都能稍后再改。先开常用项，BuzyClaw 才能更像一台真正会干活的工作台。"
+        case 8: return "这些权限都能稍后再改。先开常用项，虾忙 才能更像一台真正会干活的工作台。"
         case 9: return appState.gatewayMode == .existingInstall ? "现有环境已识别完成，马上就能继续工作。" : "配置不会把你绑死，后面都能继续微调。先开始用，才是正经事。"
         default: return ""
         }
@@ -256,6 +259,10 @@ struct OnboardingView: View {
     private var currentAuthState: AuthService.AuthState? {
         guard let activeAuthFlow else { return nil }
         return stateForActiveFlow(activeAuthFlow)
+    }
+
+    private var authMethodColumns: [GridItem] {
+        [GridItem(.flexible(minimum: 220), spacing: 16), GridItem(.flexible(minimum: 220), spacing: 16)]
     }
 
     private func stateForActiveFlow(_ flow: AuthFlow) -> AuthService.AuthState? {
@@ -314,7 +321,7 @@ struct OnboardingView: View {
                 }
 
                 VStack(spacing: 12) {
-                    Text("BuzyClaw 不是一个只会聊天的 AI。")
+                    Text("虾忙 不是一个只会聊天的 AI。")
                         .font(.system(size: 30, weight: .bold))
                         .multilineTextAlignment(.center)
                     Text("它更像一套运行在你自己设备上的个人工作台：能对话、记任务、做提醒、装技能、接管工具，也能在 macOS 和 iPhone 之间自然协同。数据留在你手里，能力按你的习惯长出来。")
@@ -485,11 +492,11 @@ struct OnboardingView: View {
         ScrollView {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 26) {
-                    sectionIntro(title: "把相处方式一次说清楚", description: "BuzyClaw 可以有态度，但别搞成戏精。把风格定好，后面省心很多。")
+                    sectionIntro(title: "把相处方式一次说清楚", description: "虾忙 可以有态度，但别搞成戏精。把风格定好，后面省心很多。")
 
                     VStack(alignment: .leading, spacing: 14) {
                         fieldLabel("说话风格")
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
                             personalityCard(id: "professional", emoji: "🎯", title: "专业高效", desc: "简洁、明确、抓重点")
                             personalityCard(id: "warm", emoji: "😊", title: "温暖贴心", desc: "更友好，也更照顾情绪")
                             personalityCard(id: "witty", emoji: "😏", title: "幽默毒舌", desc: "有态度，不装孙子")
@@ -542,24 +549,25 @@ struct OnboardingView: View {
         return selectionRow(isSelected: isSelected) {
             selectedPersonality = id
         } content: {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     Text(emoji)
-                        .font(.system(size: 28))
-                    Spacer(minLength: 12)
+                        .font(.system(size: 18))
+                    Spacer(minLength: 8)
                     selectionIndicator(isSelected: isSelected)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.headline)
+                        .font(.system(size: 14, weight: .semibold))
                     Text(desc)
-                        .font(.callout)
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 140, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 40, alignment: .topLeading)
         }
     }
 
@@ -569,7 +577,7 @@ struct OnboardingView: View {
         ScrollView {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 24) {
-                    sectionIntro(title: "让 BuzyClaw 更懂你", description: "不用填很多，只把影响协作体验的关键信息告诉它。")
+                    sectionIntro(title: "让 虾忙 更懂你", description: "不用填很多，只把影响协作体验的关键信息告诉它。")
 
                     VStack(alignment: .leading, spacing: 10) {
                         fieldLabel("希望怎么称呼你")
@@ -594,7 +602,7 @@ struct OnboardingView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 12) {
-                        fieldLabel("你最常用 BuzyClaw 做什么（至少选 1 个）")
+                        fieldLabel("你最常用 虾忙 做什么（至少选 1 个）")
                         tagGrid(
                             options: ["💻 编程开发", "📝 写作内容", "🔍 研究分析", "📅 日程管理", "📋 项目管理", "🧠 知识管理", "🎨 创意设计", "💬 日常助手"],
                             selected: $selectedScenarios
@@ -608,8 +616,8 @@ struct OnboardingView: View {
     }
 
     private func tagGrid(options: [String], selected: Binding<Set<String>>) -> some View {
-        let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
-        return LazyVGrid(columns: columns, spacing: 12) {
+        let columns = [GridItem(.adaptive(minimum: 88), spacing: 10)]
+        return LazyVGrid(columns: columns, spacing: 10) {
             ForEach(options, id: \.self) { option in
                 let isSelected = selected.wrappedValue.contains(option)
                 Button {
@@ -619,20 +627,19 @@ struct OnboardingView: View {
                         selected.wrappedValue.insert(option)
                     }
                 } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 8) {
                         Text(option)
-                            .font(.callout.weight(.medium))
+                            .font(.system(size: 13, weight: .medium))
                             .lineLimit(1)
-                        Spacer(minLength: 0)
                         if isSelected {
                             Image(systemName: "checkmark.circle.fill")
-                                .font(.callout)
+                                .font(.system(size: 12))
                                 .foregroundStyle(Color.accentColor)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 44)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 40)
                     .background(selectionBackground(isSelected))
                 }
                 .buttonStyle(.plain)
@@ -657,72 +664,9 @@ struct OnboardingView: View {
                         .frame(width: selectedProvider == nil ? 620 : 290, alignment: .leading)
 
                         if let provider = selectedProvider {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("\(selectedProviderName) 认证")
-                                    .font(.title3.bold())
-
-                                switch provider {
-                                case .anthropic:
-                                    VStack(spacing: 12) {
-                                        authMethodGroup(title: "API Key") {
-                                            keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
-                                        }
-                                        authMethodGroup(title: "Setup Token") {
-                                            setupTokenSection
-                                        }
-                                    }
-                                case .openai:
-                                    VStack(spacing: 12) {
-                                        authMethodGroup(title: "API Key") {
-                                            keyInputSection(provider: .openai, flow: .openAIAPIKey)
-                                        }
-                                        authMethodGroup(title: "OAuth 登录") {
-                                            openAIOAuthSection
-                                        }
-                                    }
-                                case .minimax:
-                                    VStack(spacing: 12) {
-                                        authMethodGroup(title: "API Key") {
-                                            minimaxKeyInputSection
-                                        }
-                                        authMethodGroup(title: "OAuth 登录") {
-                                            minimaxOAuthSection
-                                        }
-                                    }
-                                case .kimi:
-                                    authMethodGroup(title: "API Key") {
-                                        kimiAuthSection
-                                    }
-                                case .zai:
-                                    authMethodGroup(title: "API Key") {
-                                        genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan, flow: .zaiAPIKey)
-                                    }
-                                case .qwen:
-                                    authMethodGroup(title: "API Key") {
-                                        genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo, flow: .qwenAPIKey)
-                                    }
-                                case .google:
-                                    authMethodGroup(title: "API Key") {
-                                        genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red, flow: .googleAPIKey)
-                                    }
-                                case .xai:
-                                    authMethodGroup(title: "API Key") {
-                                        genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray, flow: .xaiAPIKey)
-                                    }
-                                case .openrouter:
-                                    authMethodGroup(title: "API Key") {
-                                        genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint, flow: .openRouterAPIKey)
-                                    }
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(22)
-                            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                                    .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
-                            )
-                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            providerAuthContent(for: provider)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .transition(.opacity.combined(with: .move(edge: .trailing)))
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: selectedProvider == nil ? .center : .leading)
@@ -732,6 +676,59 @@ struct OnboardingView: View {
         }
         .scrollIndicators(.hidden)
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
+    }
+
+    @ViewBuilder
+    private func providerAuthContent(for provider: AuthService.Provider) -> some View {
+        LazyVGrid(columns: authMethodColumns, alignment: .leading, spacing: 16) {
+            switch provider {
+            case .anthropic:
+                authMethodGroup {
+                    keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
+                }
+                authMethodGroup {
+                    setupTokenSection
+                }
+            case .openai:
+                authMethodGroup {
+                    keyInputSection(provider: .openai, flow: .openAIAPIKey)
+                }
+                authMethodGroup {
+                    openAIOAuthSection
+                }
+            case .minimax:
+                authMethodGroup {
+                    minimaxKeyInputSection
+                }
+                authMethodGroup {
+                    minimaxOAuthSection
+                }
+            case .kimi:
+                authMethodGroup {
+                    kimiAuthSection
+                }
+            case .zai:
+                authMethodGroup {
+                    genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan, flow: .zaiAPIKey)
+                }
+            case .qwen:
+                authMethodGroup {
+                    genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo, flow: .qwenAPIKey)
+                }
+            case .google:
+                authMethodGroup {
+                    genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red, flow: .googleAPIKey)
+                }
+            case .xai:
+                authMethodGroup {
+                    genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray, flow: .xaiAPIKey)
+                }
+            case .openrouter:
+                authMethodGroup {
+                    genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint, flow: .openRouterAPIKey)
+                }
+            }
+        }
     }
 
     private func providerRow(_ option: ProviderOption) -> some View {
@@ -765,20 +762,11 @@ struct OnboardingView: View {
         }
     }
 
-    private func authMethodGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func authMethodGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
             content()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: - Step 6: Skills
@@ -788,7 +776,7 @@ struct OnboardingView: View {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(alignment: .top) {
-                        sectionIntro(title: "先装上常用技能", description: "缺依赖的能力会直接标出来。先把常用的开上，后面再微调。")
+                        sectionIntro(title: "先装上常用技能", description: "先把常用的开上，后面再微调。")
                         Spacer(minLength: 16)
                     }
 
@@ -841,26 +829,11 @@ struct OnboardingView: View {
                         .font(.title3)
                     Text(skill.name)
                         .font(.headline)
-                    Text(skill.sourceLabel)
-                        .font(.caption2.weight(.medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.12), in: Capsule())
                 }
 
                 if let description = skill.description {
                     Text(description)
                         .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
-                Text(skill.onboardingStatusText)
-                    .font(.caption)
-                    .foregroundStyle(skill.onboardingStatusColor)
-
-                if let detail = skill.missingSummary {
-                    Text(detail)
-                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -1314,7 +1287,7 @@ struct OnboardingView: View {
     private var toolsProfileStep: some View {
         onboardingCard {
             VStack(alignment: .leading, spacing: 20) {
-                sectionIntro(title: "给 BuzyClaw 划清工具边界", description: "能力和边界一起设计，才是能长期用下去的体验。")
+                sectionIntro(title: "给 虾忙 划清工具边界", description: "能力和边界一起设计，才是能长期用下去的体验。")
 
                 VStack(spacing: 12) {
                     toolsProfileCard(id: "full", emoji: "🔓", title: "完整 Full", desc: "开放全部工具：文件、终端、浏览器、消息等")
@@ -1549,11 +1522,11 @@ struct OnboardingView: View {
         ZStack {
             Circle()
                 .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 2)
-                .frame(width: 24, height: 24)
+                .frame(width: 18, height: 18)
             if isSelected {
                 Circle()
                     .fill(Color.accentColor)
-                    .frame(width: 12, height: 12)
+                    .frame(width: 8, height: 8)
             }
         }
     }
@@ -1641,7 +1614,7 @@ struct OnboardingView: View {
                 .textFieldStyle(.plain)
                 .font(.system(.body, design: .monospaced))
                 .padding(.horizontal, 18)
-                .frame(height: 50)
+                .frame(height: 46)
                 .background(Color(nsColor: .textBackgroundColor), in: Capsule())
                 .overlay(
                     Capsule()
@@ -1666,7 +1639,7 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .tint(isAuthenticated ? .green : tint)
             .controlSize(.large)
-            .frame(height: 50)
+            .frame(height: 46)
             .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || currentAuthState == .verifying || isAuthenticated)
         }
     }
