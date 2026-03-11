@@ -113,15 +113,15 @@ struct ContentView: View {
         case .none:
             return "ClawTower"
         case .secondBrain:
-            return "第二大脑"
+            return "记忆中枢"
         case .tasks:
-            return "任务"
+            return "任务看板"
         case .projects:
-            return "项目"
+            return "ClawTower"
         case .cronJobs:
-            return "定时任务"
+            return "定时提醒"
         case .skills:
-            return "Skills"
+            return "技能库"
         case .settings:
             return "设置"
         case .chat(let agentId):

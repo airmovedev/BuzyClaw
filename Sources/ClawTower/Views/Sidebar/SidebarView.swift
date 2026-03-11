@@ -21,24 +21,20 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             List(selection: $selectedNavigation) {
                 Section("导航") {
-                    NavigationLink(value: NavigationItem.secondBrain) {
-                        Label("第二大脑", systemImage: "books.vertical")
-                    }
-
                     NavigationLink(value: NavigationItem.tasks) {
-                        Label("任务", systemImage: "checklist")
-                    }
-
-                    NavigationLink(value: NavigationItem.projects) {
-                        Label("项目", systemImage: "folder")
+                        Label("任务看板", systemImage: "checklist")
                     }
 
                     NavigationLink(value: NavigationItem.cronJobs) {
-                        Label("定时任务", systemImage: "clock.badge.checkmark")
+                        Label("定时提醒", systemImage: "clock.badge.checkmark")
                     }
 
                     NavigationLink(value: NavigationItem.skills) {
-                        Label("Skills", systemImage: "puzzlepiece")
+                        Label("技能库", systemImage: "puzzlepiece")
+                    }
+
+                    NavigationLink(value: NavigationItem.secondBrain) {
+                        Label("记忆中枢", systemImage: "books.vertical")
                     }
                 }
 
@@ -79,14 +75,7 @@ struct SidebarView: View {
 
                 Spacer()
 
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(appState.gatewayManager.isRunning ? .green : .red)
-                        .frame(width: 6, height: 6)
-                    Text(appState.gatewayManager.statusText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                GatewayStatusBadge(gatewayManager: appState.gatewayManager, compact: true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -237,6 +226,11 @@ struct SidebarView: View {
             Text(agent.displayName)
                 .lineLimit(1)
             Spacer()
+            if isAgentWorking(agent) {
+                Text("工作中…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if appState.unreadAgentIDs.contains(agent.id) {
                 Text("新消息")
                     .font(.caption2)
@@ -325,6 +319,18 @@ struct SidebarView: View {
         let staleKeys = appState.trackedSubagentKeys.subtracting(currentSubagentKeys)
         appState.removeTrackedSubagents(staleKeys)
 
+        // 已完成的 subagent session 也移除跟踪
+        let completedKeys = Set(sessions.filter { session in
+            guard session.key.contains(":subagent:") else { return false }
+            guard appState.trackedSubagentKeys.contains(session.key) else { return false }
+            if let status = session.status {
+                let doneStatuses = ["done", "completed", "timed_out", "killed", "error"]
+                return doneStatuses.contains(status.lowercased())
+            }
+            return false
+        }.map { $0.key })
+        appState.removeTrackedSubagents(completedKeys)
+
         // 只显示被跟踪的 subagent sessions
         var activeSubs: [String: [Session]] = [:]
         for (agentId, agentSessions) in allSubagentSessions {
@@ -335,10 +341,31 @@ struct SidebarView: View {
         }
         activeSubagents = activeSubs
 
-        // active agent IDs 基于跟踪的 subagents
+        // active agent IDs: tracked subagents + standalone agent main sessions with recent activity
         var active = Set<String>()
         for (agentId, subs) in activeSubs {
             if !subs.isEmpty { active.insert(agentId) }
+        }
+        // Check standalone agent sessions (non-main agents with recent main/subagent session activity)
+        let now = Date()
+        let doneStatuses: Set<String> = ["done", "completed", "timed_out", "killed", "error"]
+        for session in sessions {
+            // Skip cron sessions
+            if session.key.contains(":cron:") { continue }
+            let parts = session.key.split(separator: ":")
+            guard parts.count >= 2 else { continue }
+            let agentId = String(parts[1])
+            // Skip main agent's own main session (always active from user chat)
+            if agentId == "main" && !session.key.contains(":subagent:") { continue }
+            // Already marked active
+            if active.contains(agentId) { continue }
+            // Skip completed sessions
+            if let status = session.status, doneStatuses.contains(status.lowercased()) { continue }
+            // Check if updated within 120 seconds
+            if let updatedAt = session.updatedAt,
+               now.timeIntervalSince(updatedAt) < 120 {
+                active.insert(agentId)
+            }
         }
         activeAgentIDs = active
     }
@@ -366,5 +393,68 @@ struct SidebarView: View {
     private func markSessionRead(_ sessionKey: String) {
         readTimestamps[sessionKey] = Date().timeIntervalSince1970
         UserDefaults.standard.set(readTimestamps, forKey: "SidebarReadTimestamps")
+    }
+}
+
+struct GatewayStatusBadge: View {
+    let gatewayManager: GatewayManager
+    var compact: Bool = false
+    @State private var isAnimating = false
+
+    var body: some View {
+        HStack(spacing: compact ? 4 : 8) {
+            ZStack {
+                Circle()
+                    .fill(statusColor.opacity(gatewayManager.isReconnecting ? 0.22 : 1))
+                    .frame(width: compact ? 6 : 10, height: compact ? 6 : 10)
+                    .scaleEffect(gatewayManager.isReconnecting && isAnimating ? 1.9 : 1)
+                    .opacity(gatewayManager.isReconnecting && isAnimating ? 0 : 1)
+
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: compact ? 6 : 10, height: compact ? 6 : 10)
+                    .overlay {
+                        if gatewayManager.isReconnecting {
+                            ProgressView()
+                                .controlSize(.mini)
+                                .tint(.white)
+                                .scaleEffect(compact ? 0.35 : 0.55)
+                        }
+                    }
+            }
+            .frame(width: compact ? 8 : 12, height: compact ? 8 : 12)
+
+            Text(gatewayManager.statusText)
+                .font(compact ? .caption2 : .caption)
+                .foregroundStyle(gatewayManager.isConnectionWarning ? .orange : .secondary)
+        }
+        .onAppear { updateAnimationState() }
+        .onChange(of: gatewayManager.state) { _, _ in updateAnimationState() }
+        .accessibilityLabel("Gateway \(gatewayManager.statusText)")
+    }
+
+    private var statusColor: Color {
+        switch gatewayManager.state {
+        case .running:
+            return .green
+        case .starting, .reconnecting:
+            return .orange
+        case .disconnected:
+            return .orange
+        case .stopped:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+
+    private func updateAnimationState() {
+        if gatewayManager.isReconnecting {
+            withAnimation(.easeOut(duration: 1).repeatForever(autoreverses: false)) {
+                isAnimating = true
+            }
+        } else {
+            isAnimating = false
+        }
     }
 }

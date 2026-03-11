@@ -100,7 +100,7 @@ struct SkillsView: View {
                 .listStyle(.inset(alternatesRowBackgrounds: true))
             }
         }
-        .navigationTitle("Skills")
+        .navigationTitle("技能库")
         .task {
             await service.loadSkills()
         }

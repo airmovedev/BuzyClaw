@@ -65,6 +65,7 @@ struct CronJobsView: View {
                 Task { await loadJobs() }
             }
         }
+        .navigationTitle("定时提醒")
         .task {
             loadAgentNames()
             await loadJobs()
@@ -113,9 +114,6 @@ private struct CronJobCardView: View {
     @State private var showFullMessage = false
     @State private var showDeleteAlert = false
     @State private var isToggling = false
-    @State private var showHistory = false
-    @State private var runs: [[String: Any]] = []
-    @State private var isLoadingRuns = false
 
     private var statusDotColor: Color {
         switch job.statusColor {
@@ -186,15 +184,6 @@ private struct CronJobCardView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                Button("历史") {
-                    showHistory.toggle()
-                    if showHistory && runs.isEmpty {
-                        loadRuns()
-                    }
-                }
-                .font(.caption)
-                .buttonStyle(.bordered)
-                .controlSize(.small)
 
                 Spacer()
 
@@ -206,26 +195,6 @@ private struct CronJobCardView: View {
                 .controlSize(.small)
             }
 
-            // History panel
-            if showHistory {
-                VStack(alignment: .leading, spacing: 4) {
-                    if isLoadingRuns {
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
-                    } else if runs.isEmpty {
-                        Text("暂无运行记录")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(runs.prefix(5).enumerated()), id: \.offset) { _, run in
-                            CronRunRowView(run: run)
-                        }
-                    }
-                }
-                .padding(8)
-                .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-            }
         }
         .padding(10)
         .background(.background.shadow(.drop(radius: 1)), in: RoundedRectangle(cornerRadius: 8))
@@ -242,75 +211,6 @@ private struct CronJobCardView: View {
         }
     }
 
-    private func loadRuns() {
-        isLoadingRuns = true
-        Task {
-            do {
-                runs = try await client.cronJobRuns(jobId: job.id)
-            } catch {
-                runs = []
-            }
-            isLoadingRuns = false
-        }
-    }
-}
-
-// MARK: - Cron Run Row
-
-private struct CronRunRowView: View {
-    let run: [String: Any]
-
-    private var timestamp: String {
-        if let ts = run["startedAt"] as? Double {
-            let date = Date(timeIntervalSince1970: ts > 1e12 ? ts / 1000 : ts)
-            return Self.formatter.string(from: date)
-        }
-        if let ts = run["timestamp"] as? Double {
-            let date = Date(timeIntervalSince1970: ts > 1e12 ? ts / 1000 : ts)
-            return Self.formatter.string(from: date)
-        }
-        if let ts = run["time"] as? String {
-            return ts
-        }
-        return "—"
-    }
-
-    private var status: String {
-        if let s = run["status"] as? String { return s }
-        if let s = run["result"] as? String { return s }
-        if let ok = run["success"] as? Bool { return ok ? "success" : "error" }
-        return "unknown"
-    }
-
-    private var statusColor: Color {
-        switch status {
-        case "success", "ok", "completed": return .green
-        case "error", "failed", "failure": return .red
-        case "running", "pending": return .orange
-        default: return .gray
-        }
-    }
-
-    private static let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MM-dd HH:mm"
-        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
-        return f
-    }()
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 6, height: 6)
-            Text(timestamp)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(status)
-                .font(.caption2)
-                .foregroundStyle(statusColor)
-        }
-    }
 }
 
 // MARK: - Create Cron Job Sheet

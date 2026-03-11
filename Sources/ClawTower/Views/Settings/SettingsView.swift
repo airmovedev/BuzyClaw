@@ -51,20 +51,82 @@ struct DetectedModel: Identifiable {
     }
 }
 
+private enum SessionVisibility: String, CaseIterable, Identifiable {
+    case tree
+    case selfOnly = "self"
+    case agent
+    case all
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tree: return "tree（默认）"
+        case .selfOnly: return "self"
+        case .agent: return "agent"
+        case .all: return "all"
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .tree: return "仅当前会话树：当前会话，以及它派生出来的子会话。"
+        case .selfOnly: return "仅当前会话：只能看到正在使用的这个会话。"
+        case .agent: return "同 Agent 全部会话：可看到当前 Agent 名下的所有会话。"
+        case .all: return "所有会话：跨 Agent 查看整个实例里的全部会话。"
+        }
+    }
+}
+
+private struct SessionVisibilityOptionsList: View {
+    let selected: SessionVisibility
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SessionVisibilityOptionRow(option: .tree, selected: selected == .tree)
+            SessionVisibilityOptionRow(option: .selfOnly, selected: selected == .selfOnly)
+            SessionVisibilityOptionRow(option: .agent, selected: selected == .agent)
+            SessionVisibilityOptionRow(option: .all, selected: selected == .all)
+        }
+    }
+}
+
+private struct SessionVisibilityOptionRow: View {
+    let option: SessionVisibility
+    let selected: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(selected ? "●" : "○")
+                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(option.title)
+                    .font(.caption.weight(.medium))
+                Text(option.description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 struct SettingsView: View {
     @Bindable var appState: AppState
+    private let settingsTitle = "设置"
     @State private var apiKey = ""
     @State private var showResetAlert = false
     @State private var showProviderSheet = false
     @State private var detectedProviders: [String] = []
     @State private var currentToolsProfile: String = "full"
+    @State private var currentSessionVisibility: SessionVisibility = .tree
+    @State private var isRestartingGateway = false
     @State private var showRestartHint = false
-    @AppStorage("launchAtLogin") private var launchAtLogin = false
+    @AppStorage("launchAtLogin") private var launchAtLogin = true
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("设置")
+                Text(settingsTitle)
                     .font(.largeTitle.bold())
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -76,14 +138,16 @@ struct SettingsView: View {
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Circle()
-                                    .fill(statusColor)
-                                    .frame(width: 10, height: 10)
-                                Text(appState.gatewayManager.statusText)
+                                GatewayStatusBadge(gatewayManager: appState.gatewayManager)
                                 Spacer()
-                                Button("重启") {
-                                    Task { await appState.restartGateway() }
+                                Button(isRestartingGateway ? "重启中..." : "重启") {
+                                    Task {
+                                        isRestartingGateway = true
+                                        await appState.restartGateway()
+                                        isRestartingGateway = false
+                                    }
                                 }
+                                .disabled(isRestartingGateway)
                             }
 
                             if appState.gatewayManager.isRunning {
@@ -175,6 +239,30 @@ struct SettingsView: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
+                            Divider()
+                                .padding(.vertical, 4)
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Session Visibility")
+                                    Spacer()
+                                    Picker("Session Visibility", selection: $currentSessionVisibility) {
+                                        Text("tree").tag(SessionVisibility.tree)
+                                        Text("self").tag(SessionVisibility.selfOnly)
+                                        Text("agent").tag(SessionVisibility.agent)
+                                        Text("all").tag(SessionVisibility.all)
+                                    }
+                                    .labelsHidden()
+                                }
+
+                                SessionVisibilityOptionsList(selected: currentSessionVisibility)
+                                    .opacity(isRestartingGateway ? 0.7 : 1)
+                            }
+                            .disabled(isRestartingGateway)
+                            .onChange(of: currentSessionVisibility) { _, newValue in
+                                Task { await updateSessionVisibility(newValue) }
+                            }
+
                             if showRestartHint {
                                 HStack(spacing: 6) {
                                     Image(systemName: "exclamationmark.triangle.fill")
@@ -198,7 +286,10 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .onAppear { loadToolsProfile() }
+                .onAppear {
+                    loadToolsProfile()
+                    loadSessionVisibility()
+                }
 
                 HeartbeatSettingsView(appState: appState)
 
@@ -269,6 +360,10 @@ struct SettingsView: View {
             .padding(20)
         }
         .background(Color(.windowBackgroundColor))
+        .navigationTitle(settingsTitle)
+        .onAppear {
+            syncLaunchAtLoginStateIfNeeded()
+        }
         .alert("确认重置", isPresented: $showResetAlert) {
             Button("取消", role: .cancel) { }
             Button("重置", role: .destructive) {
@@ -276,6 +371,25 @@ struct SettingsView: View {
             }
         } message: {
             Text("将清除所有配置并返回引导界面，确定继续？")
+        }
+    }
+
+    private func syncLaunchAtLoginStateIfNeeded() {
+        if UserDefaults.standard.object(forKey: "launchAtLogin") != nil {
+            return
+        }
+
+        let serviceStatus = SMAppService.mainApp.status
+        if serviceStatus == .enabled {
+            launchAtLogin = true
+            return
+        }
+
+        do {
+            try SMAppService.mainApp.register()
+            launchAtLogin = true
+        } catch {
+            launchAtLogin = false
         }
     }
 
@@ -363,31 +477,28 @@ struct SettingsView: View {
             }
         }
 
+        // 从 agents.defaults.models 读取用户配置的所有模型
         if let json = configJson,
-           let auth = json["auth"] as? [String: Any],
-           let profiles = auth["profiles"] as? [String: Any] {
-            for profileKey in profiles.keys {
-                let provider = profileKey.components(separatedBy: ":").first ?? profileKey
-                guard !providersWithModels.contains(provider) else { continue }
-
-                switch provider {
-                case "anthropic":
-                    let m = "anthropic/claude-opus-4-6"
-                    if !modelIds.contains(m) {
-                        modelIds.insert(m)
-                        models.append(DetectedModel(fullId: m))
-                        providersWithModels.insert(provider)
-                    }
-                case "openai-codex":
-                    let m = "openai-codex/gpt-5.3-codex"
-                    if !modelIds.contains(m) {
-                        modelIds.insert(m)
-                        models.append(DetectedModel(fullId: m))
-                        providersWithModels.insert(provider)
-                    }
-                default:
-                    break
+           let agents = json["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let configuredModels = defaults["models"] as? [String: Any] {
+            for modelKey in configuredModels.keys {
+                if !modelIds.contains(modelKey) {
+                    modelIds.insert(modelKey)
+                    models.append(DetectedModel(fullId: modelKey))
                 }
+            }
+        }
+
+        // 也读取 primary model
+        if let json = configJson,
+           let agents = json["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let model = defaults["model"] as? [String: Any],
+           let primary = model["primary"] as? String {
+            if !modelIds.contains(primary) {
+                modelIds.insert(primary)
+                models.append(DetectedModel(fullId: primary))
             }
         }
 
@@ -428,12 +539,43 @@ struct SettingsView: View {
         }
     }
 
-    private var statusColor: Color {
-        switch appState.gatewayManager.state {
-        case .running: return .green
-        case .starting: return .orange
-        case .stopped: return .gray
-        case .error: return .red
+    private func loadSessionVisibility() {
+        let configPath = appState.openclawBasePath.appendingPathComponent("openclaw.json")
+        guard let data = try? Data(contentsOf: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tools = json["tools"] as? [String: Any],
+              let sessions = tools["sessions"] as? [String: Any],
+              let rawValue = sessions["visibility"] as? String,
+              let visibility = SessionVisibility(rawValue: rawValue) else {
+            currentSessionVisibility = .tree
+            return
         }
+        currentSessionVisibility = visibility
+    }
+
+    private func saveSessionVisibility(_ visibility: SessionVisibility) {
+        let configPath = appState.openclawBasePath.appendingPathComponent("openclaw.json")
+        var root: [String: Any] = [:]
+        if let data = try? Data(contentsOf: configPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            root = json
+        }
+
+        var tools = root["tools"] as? [String: Any] ?? [:]
+        var sessions = tools["sessions"] as? [String: Any] ?? [:]
+        sessions["visibility"] = visibility.rawValue
+        tools["sessions"] = sessions
+        root["tools"] = tools
+
+        if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: configPath, options: .atomic)
+        }
+    }
+
+    private func updateSessionVisibility(_ visibility: SessionVisibility) async {
+        saveSessionVisibility(visibility)
+        isRestartingGateway = true
+        await appState.restartGateway()
+        isRestartingGateway = false
     }
 }

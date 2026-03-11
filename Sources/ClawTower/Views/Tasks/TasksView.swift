@@ -14,7 +14,7 @@ struct TasksView: View {
             taskColumn(status: .done, title: "已完成", color: .green)
         }
         .padding(16)
-        .navigationTitle("任务")
+        .navigationTitle("任务看板")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {

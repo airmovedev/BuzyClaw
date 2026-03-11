@@ -1,8 +1,9 @@
 import AppKit
-
+import MarkdownUI
 import SwiftUI
 
 struct SecondBrainView: View {
+    private let viewTitle = "记忆中枢"
     @State private var documents: [SecondBrainDocument] = []
     @State private var selectedDocument: SecondBrainDocument?
     @State private var expandedGroups: Set<String> = []
@@ -19,6 +20,7 @@ struct SecondBrainView: View {
     // Inline editing
     @State private var isEditing = false
     @State private var editingContent: String = ""
+    @State private var isSaving = false
 
     let basePath: URL
 
@@ -40,6 +42,7 @@ struct SecondBrainView: View {
         .onDisappear {
             stopWatching()
         }
+        .navigationTitle(viewTitle)
     }
 
     // MARK: - Filtered Documents
@@ -106,18 +109,6 @@ struct SecondBrainView: View {
     @ViewBuilder
     private var fileListPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Title bar
-            HStack {
-                Text("第二大脑")
-                    .font(.largeTitle.bold())
-                Spacer()
-                Button { loadDocuments() } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .help("刷新文件列表")
-            }
-            .padding()
-
             // Search bar
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -137,6 +128,7 @@ struct SecondBrainView: View {
             .padding(8)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             .padding(.horizontal)
+            .padding(.top, 12)
             .padding(.bottom, 8)
 
             // Category tabs
@@ -271,6 +263,7 @@ struct SecondBrainView: View {
                                 saveDocument()
                             }
                             .buttonStyle(.borderedProminent)
+                            .disabled(isSaving)
                         } else {
                             Button {
                                 startEditing()
@@ -287,6 +280,7 @@ struct SecondBrainView: View {
                         Image(systemName: "folder.badge.arrow.forward")
                     }
                     .help("在 Finder 中显示")
+                    .fixedSize()
                 }
                 .padding()
 
@@ -302,7 +296,7 @@ struct SecondBrainView: View {
                         .padding(4)
                 } else {
                     ScrollView {
-                        Text(secondBrainMarkdown(document.content))
+                        Markdown(document.content)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding()
@@ -348,8 +342,13 @@ struct SecondBrainView: View {
 
     private func startEditing() {
         guard let document = selectedDocument, !document.isImage else { return }
-        editingContent = document.content
         isEditing = true
+        Task {
+            let content = (try? String(contentsOf: document.filePath, encoding: .utf8)) ?? document.content
+            await MainActor.run {
+                editingContent = content
+            }
+        }
     }
 
     private func cancelEditing() {
@@ -358,21 +357,26 @@ struct SecondBrainView: View {
     }
 
     private func saveDocument() {
-        guard let document = selectedDocument else { return }
-        do {
-            try editingContent.write(to: document.filePath, atomically: true, encoding: .utf8)
-            // Update the selected document content
-            var updated = document
-            updated.content = editingContent
-            selectedDocument = updated
-            // Also update in the documents array
-            if let idx = documents.firstIndex(where: { $0.id == document.id }) {
-                documents[idx].content = editingContent
+        guard let document = selectedDocument, !isSaving else { return }
+        isSaving = true
+        let contentToSave = editingContent
+        Task {
+            do {
+                try contentToSave.write(to: document.filePath, atomically: true, encoding: .utf8)
+            } catch {
+                // Silently fail — could add alert later
             }
-            isEditing = false
-            editingContent = ""
-        } catch {
-            // Silently fail — could add alert later
+            await MainActor.run {
+                var updated = document
+                updated.content = contentToSave
+                selectedDocument = updated
+                if let idx = documents.firstIndex(where: { $0.id == document.id }) {
+                    documents[idx].content = contentToSave
+                }
+                isEditing = false
+                editingContent = ""
+                isSaving = false
+            }
         }
     }
 
@@ -492,10 +496,3 @@ private struct SecondBrainDocRow: View {
     }
 }
 
-private func secondBrainMarkdown(_ string: String) -> AttributedString {
-    do {
-        return try AttributedString(markdown: string, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-    } catch {
-        return AttributedString(string)
-    }
-}

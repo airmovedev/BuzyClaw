@@ -1046,6 +1046,7 @@ private struct SlashCommandMenu: View {
 
 // 改动3 & 4: isLastMessage参数，截断按钮移到气泡内右下角
 private struct MessageBubble: View {
+    @Environment(\.colorScheme) private var colorScheme
     let message: ChatMessage
     var displayContent: String? = nil
     let agentEmoji: String
@@ -1226,6 +1227,23 @@ private struct MessageBubble: View {
             && !message.isStreaming
     }
 
+    private var assistantBubbleBackgroundColor: Color {
+        colorScheme == .light ? Color(nsColor: .quaternaryLabelColor).opacity(0.12) : Color(.controlBackgroundColor)
+    }
+
+    private var bubbleBackgroundColor: Color {
+        if message.isSystemInjected {
+            return Color.orange.opacity(0.08)
+        }
+        if message.isUser {
+            return Color.accentColor.opacity(0.15)
+        }
+        if message.isAssistant {
+            return assistantBubbleBackgroundColor
+        }
+        return Color(.controlBackgroundColor)
+    }
+
     private func perfLog(_ message: String) {
         NSLog("\(Self.perfPrefix) %@", message)
     }
@@ -1372,7 +1390,7 @@ private struct MessageBubble: View {
                 }
             }
             .padding(10)
-            .background(message.isSystemInjected ? Color.orange.opacity(0.08) : message.isUser ? Color.accentColor.opacity(0.15) : Color(.controlBackgroundColor))
+            .background(bubbleBackgroundColor)
             .clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay {
                 if message.isStreaming {

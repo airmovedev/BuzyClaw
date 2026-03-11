@@ -4,6 +4,7 @@ struct HeartbeatSettingsView: View {
     @Bindable var appState: AppState
 
     private static let intervalOptions = ["30m", "1h", "2h", "4h"]
+    private static let fallbackEnabledDefault = true
 
     @State private var globalEnabled = false
     @State private var defaultInterval = "1h"
@@ -88,14 +89,17 @@ struct HeartbeatSettingsView: View {
         defer { hasLoaded = true }
 
         guard let json = readConfig() else {
-            globalEnabled = false
+            globalEnabled = Self.fallbackEnabledDefault
             buildModelOptions(from: nil)
+            applyDefaultModelIfNeeded()
             return
         }
 
         var heartbeatModelFromConfig: String?
         if let agentsObj = json["agents"] as? [String: Any],
            let defaults = agentsObj["defaults"] as? [String: Any] {
+            buildModelOptions(from: defaults)
+
             if let hb = defaults["heartbeat"] as? [String: Any] {
                 globalEnabled = true
                 if let every = hb["every"] as? String { defaultInterval = every }
@@ -104,22 +108,19 @@ struct HeartbeatSettingsView: View {
                     heartbeatModelFromConfig = model
                 }
             } else {
-                globalEnabled = false
+                globalEnabled = Self.fallbackEnabledDefault
             }
 
-            buildModelOptions(from: defaults)
-            if defaultModel.isEmpty {
-                if let first = modelOptions.first?.id {
-                    defaultModel = first
-                } else if let fallback = heartbeatModelFromConfig {
-                    defaultModel = fallback
-                }
+            if defaultModel.isEmpty, let fallback = heartbeatModelFromConfig {
+                defaultModel = fallback
             }
+            applyDefaultModelIfNeeded()
             return
         }
 
-        globalEnabled = false
+        globalEnabled = Self.fallbackEnabledDefault
         buildModelOptions(from: nil)
+        applyDefaultModelIfNeeded()
     }
 
     private func buildModelOptions(from defaults: [String: Any]?) {
@@ -148,6 +149,12 @@ struct HeartbeatSettingsView: View {
             return "\(trimmedAlias) (\(modelId))"
         }
         return modelId
+    }
+
+    private func applyDefaultModelIfNeeded() {
+        if defaultModel.isEmpty, let first = modelOptions.first?.id {
+            defaultModel = first
+        }
     }
 
     private func scheduleSaveIfLoaded() {
