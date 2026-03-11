@@ -5,62 +5,71 @@ struct AgentDetailView: View {
     let agent: AgentSnapshot
     @State private var selectedModel: String
 
-    private static let defaultModels = [
-        "anthropic/claude-sonnet-4-20250514",
-        "anthropic/claude-opus-4-6",
-        "openai-codex/gpt-5.3-codex"
-    ]
-
     private let availableModels: [String]
 
-    init(agent: AgentSnapshot, currentSession: SessionSnapshot? = nil) {
+    init(agent: AgentSnapshot, currentSession: SessionSnapshot? = nil, availableModels: [String] = []) {
         self.agent = agent
 
-        let saved = UserDefaults.standard.string(forKey: "modelOverride-\(agent.id)")
+        let savedOverride = UserDefaults.standard.string(forKey: "modelOverride-\(agent.id)")
+        let configuredModels = Self.sanitizedModels(availableModels)
+        let resolvedModel = Self.resolveSelectedModel(
+            sessionModel: currentSession?.model,
+            agentModel: agent.currentModel,
+            savedOverride: savedOverride,
+            configuredModels: configuredModels
+        )
 
-        // 归一化 agent 当前模型
-        let normalized: String
-        if let current = agent.currentModel, current != "default", !current.isEmpty {
-            normalized = Self.normalizeModelId(current)
-        } else if let saved, saved != "default", !saved.isEmpty {
-            normalized = Self.normalizeModelId(saved)
-        } else {
-            normalized = Self.defaultModels[1] // opus 作为默认
+        self.availableModels = Self.buildAvailableModels(
+            configuredModels: configuredModels,
+            selectedModel: resolvedModel
+        )
+        _selectedModel = State(initialValue: resolvedModel)
+    }
+
+    private static func resolveSelectedModel(
+        sessionModel: String?,
+        agentModel: String?,
+        savedOverride: String?,
+        configuredModels: [String]
+    ) -> String {
+        let candidates = [sessionModel, agentModel, savedOverride]
+            .compactMap { $0 }
+            .map(normalizeModelId)
+            .filter { !$0.isEmpty && $0 != "default" }
+
+        if let first = candidates.first {
+            return first
         }
 
-        // 确保列表里有当前模型
-        if Self.defaultModels.contains(normalized) {
-            self.availableModels = Self.defaultModels
-        } else {
-            self.availableModels = Self.defaultModels + [normalized]
+        return configuredModels.first ?? "anthropic/claude-sonnet-4-20250514"
+    }
+
+    private static func buildAvailableModels(configuredModels: [String], selectedModel: String) -> [String] {
+        var result = sanitizedModels(configuredModels)
+        if !selectedModel.isEmpty && !result.contains(selectedModel) {
+            result.append(selectedModel)
+        }
+        return result
+    }
+
+    private static func sanitizedModels(_ models: [String]) -> [String] {
+        var result: [String] = []
+
+        for model in models.map(normalizeModelId) where !model.isEmpty && model != "default" {
+            if !result.contains(model) {
+                result.append(model)
+            }
         }
 
-        _selectedModel = State(initialValue: normalized)
+        return result
     }
 
     private static func normalizeModelId(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if trimmed.contains("opus") && !trimmed.hasPrefix("anthropic/") {
-            return "anthropic/claude-opus-4-6"
-        }
-        if trimmed.contains("sonnet") && !trimmed.hasPrefix("anthropic/") {
-            return "anthropic/claude-sonnet-4-20250514"
-        }
-        if trimmed.contains("codex") && !trimmed.hasPrefix("openai") {
-            return "openai-codex/gpt-5.3-codex"
-        }
-        if defaultModels.contains(trimmed) {
-            return trimmed
-        }
-        if let match = defaultModels.first(where: { $0.lowercased() == trimmed }) {
-            return match
-        }
-        return raw
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
         List {
-            // Agent Info
             Section {
                 HStack(spacing: 12) {
                     Text(agent.identityEmoji ?? agent.emoji ?? "🤖")
@@ -83,7 +92,6 @@ struct AgentDetailView: View {
                 .padding(.vertical, 4)
             }
 
-            // Model Selection
             Section("AI 模型") {
                 Picker("模型", selection: $selectedModel) {
                     ForEach(availableModels, id: \.self) { model in
@@ -99,7 +107,6 @@ struct AgentDetailView: View {
                     }
                 }
             }
-
         }
         .navigationTitle("Agent 详情")
         .navigationBarTitleDisplayMode(.inline)

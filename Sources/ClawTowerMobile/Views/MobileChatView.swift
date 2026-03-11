@@ -14,6 +14,7 @@ struct MobileChatView: View {
     @State private var showAgentDetail = false
     @State private var agentSnapshot: AgentSnapshot?
     @State private var currentSessionSnapshot: SessionSnapshot?
+    @State private var availableModels: [String] = []
     @State private var pendingImageData: Data?
     @State private var pendingImagePreview: UIImage?
     @State private var selectedPhotoItem: PhotosPickerItem?
@@ -42,12 +43,24 @@ struct MobileChatView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                NavigationLink {
-                    AgentDetailView(
-                        agent: agentSnapshot ?? AgentSnapshot(id: agentId, displayName: agentName, emoji: nil)
-                    )
-                } label: {
-                    Image(systemName: "info.circle")
+                HStack(spacing: 16) {
+                    Button {
+                        let shortId = UUID().uuidString.prefix(8).lowercased()
+                        let newKey = "agent:\(agentId):mobile-\(shortId)"
+                        messageClient.selectSession(newKey)
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+
+                    NavigationLink {
+                        AgentDetailView(
+                            agent: agentSnapshot ?? AgentSnapshot(id: agentId, displayName: agentName, emoji: nil),
+                            currentSession: currentSessionSnapshot,
+                            availableModels: availableModels
+                        )
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
                 }
             }
         }
@@ -272,6 +285,7 @@ struct MobileChatView: View {
             if let snap = DashboardSnapshotRecord.from(record: record) {
                 agentSnapshot = snap.agents.first { $0.id == agentId }
                 currentSessionSnapshot = snap.sessions?.first { $0.id == messageClient.currentSessionKey }
+                availableModels = snap.availableModels ?? []
             }
         } catch {
             // Silently fail
@@ -310,6 +324,17 @@ struct SessionPickerView: View {
 
     var body: some View {
         List {
+            Section {
+                Button {
+                    let shortId = UUID().uuidString.prefix(8).lowercased()
+                    let newKey = "agent:\(agentId):mobile-\(shortId)"
+                    messageClient.selectSession(newKey)
+                    dismiss()
+                } label: {
+                    Label("新建会话", systemImage: "plus.bubble")
+                }
+            }
+
             Section("主会话") {
                 sessionRow(
                     key: "agent:\(agentId):main",

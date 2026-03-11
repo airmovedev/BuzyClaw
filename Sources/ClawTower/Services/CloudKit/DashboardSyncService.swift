@@ -96,6 +96,7 @@ final class DashboardSyncService {
         let secondBrainDocs = Self.loadSecondBrainDocs(from: appState.secondBrainPath)
         let cronJobs = await loadCronJobs(client: appState.gatewayClient)
         let sessions = await loadSessions(client: appState.gatewayClient, agents: appState.agents)
+        let availableModels = AgentDraft.modelOptions
 
         return DashboardSnapshot(
             timestamp: Date(),
@@ -104,7 +105,8 @@ final class DashboardSyncService {
             tasks: tasks,
             cronJobs: cronJobs,
             secondBrainDocs: secondBrainDocs,
-            sessions: sessions
+            sessions: sessions,
+            availableModels: availableModels
         )
     }
 
@@ -146,7 +148,11 @@ final class DashboardSyncService {
 
             let modDate = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
             let content = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
-            let preview = String(content.prefix(2000))
+            let maxChars = 50000
+            let truncated = String(content.prefix(maxChars))
+            let preview = content.count > maxChars
+                ? truncated + "\n\n---\n\n> ⚠️ 文档过长，仅显示前 50000 字符"
+                : truncated
 
             let fileName = fileURL.lastPathComponent
             let displayName = fileName.hasSuffix(".md") ? String(fileName.dropLast(3)) : fileName

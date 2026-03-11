@@ -9,6 +9,7 @@ struct DashboardSnapshot: Codable, Sendable {
     var cronJobs: [CronJobSnapshot]?
     var secondBrainDocs: [SecondBrainDocSnapshot]?
     var sessions: [SessionSnapshot]?
+    var availableModels: [String]?
 
     init(
         timestamp: Date? = nil,
@@ -17,7 +18,8 @@ struct DashboardSnapshot: Codable, Sendable {
         tasks: [TaskSnapshot] = [],
         cronJobs: [CronJobSnapshot]? = nil,
         secondBrainDocs: [SecondBrainDocSnapshot]? = nil,
-        sessions: [SessionSnapshot]? = nil
+        sessions: [SessionSnapshot]? = nil,
+        availableModels: [String]? = nil
     ) {
         self.timestamp = timestamp
         self.agents = agents
@@ -26,6 +28,7 @@ struct DashboardSnapshot: Codable, Sendable {
         self.cronJobs = cronJobs
         self.secondBrainDocs = secondBrainDocs
         self.sessions = sessions
+        self.availableModels = availableModels
     }
 }
 
