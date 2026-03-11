@@ -275,30 +275,33 @@ struct SidebarView: View {
             .lowercased()
     }
 
-    private func isTerminalSession(_ session: Session, now: Date = Date()) -> Bool {
+    private func isTerminalSession(_ session: Session) -> Bool {
         let terminalStatuses: Set<String> = [
             "done", "completed", "complete", "finished", "success",
             "failed", "error", "errored", "cancelled", "canceled",
             "timed_out", "timeout", "killed", "stopped", "terminated"
         ]
-        if let status = normalizedSessionStatus(session), terminalStatuses.contains(status) {
-            return true
-        }
+        guard let status = normalizedSessionStatus(session) else { return false }
+        return terminalStatuses.contains(status)
+    }
 
-        // 部分 session 在完成后 status 不会及时落成 done/completed，
-        // 但会很快变成非活跃语义；这里把这类状态也当成已结束处理。
+    private func hasInactiveSessionStatus(_ session: Session) -> Bool {
         let inactiveStatuses: Set<String> = ["idle", "inactive", "closed", "exited"]
-        if let status = normalizedSessionStatus(session), inactiveStatuses.contains(status) {
-            return true
+        guard let status = normalizedSessionStatus(session) else { return false }
+        return inactiveStatuses.contains(status)
+    }
+
+    private func hasSubagentCompletionEvent(_ sessionKey: String) async -> Bool {
+        guard let messages = try? await appState.gatewayClient.getHistoryWithTools(sessionKey: sessionKey, limit: 40) else {
+            return false
         }
 
-        // subagent 完成后如果状态字段没及时更新，至少不能在侧栏永远挂着。
-        // 对 tracked subagent 增加一个兜底回收：长时间无更新则视为已结束。
-        if session.isSubAgent,
-           appState.trackedSubagentKeys.contains(session.key),
-           let updatedAt = session.updatedAt,
-           now.timeIntervalSince(updatedAt) > 20 {
-            return true
+        for msg in messages.reversed() {
+            let role = msg["role"] as? String ?? ""
+            let isSystem = MessageParser.isSystemInjected(role: role, content: msg["content"])
+            if MessageParser.isSubagentCompletion(role: role, content: msg["content"], isSystemInjected: isSystem) {
+                return true
+            }
         }
 
         return false
@@ -313,7 +316,6 @@ struct SidebarView: View {
 
     private func loadSessions() async {
         guard let sessions = try? await appState.gatewayClient.listSessions(limit: 100) else { return }
-        let now = Date()
         var grouped: [String: [Session]] = [:]
         for session in sessions {
             let isCron = session.key.contains(":cron:")
@@ -356,23 +358,37 @@ struct SidebarView: View {
             previousSubagentKeys = currentSubagentKeys
         }
 
+        // Sidebar 的 subagent 运行态尽量跟活动动态对齐：
+        // - 直接信任明确终态 status
+        // - 对 tracked subagent，不再用 idle / updatedAt 猜结束，而是检查历史里是否出现 completion event
+        let trackedSubagentSessions = sessions.filter { session in
+            session.isSubAgent && appState.trackedSubagentKeys.contains(session.key)
+        }
+
+        var completedKeys = Set(sessions.filter { session in
+            guard session.isSubAgent else { return false }
+            guard appState.trackedSubagentKeys.contains(session.key) else { return false }
+            return isTerminalSession(session)
+        }.map { $0.key })
+
+        for session in trackedSubagentSessions where !completedKeys.contains(session.key) {
+            if await hasSubagentCompletionEvent(session.key) {
+                completedKeys.insert(session.key)
+            }
+        }
+
         // 统一回收 tracked keys：
         // 1) session 已经不在列表里
         // 2) session 明确进入终态
-        // 3) session 长时间无更新的兜底回收，避免“工作中…”永久挂死
+        // 3) 活动动态已出现 completion event
         let staleKeys = appState.trackedSubagentKeys.subtracting(currentSubagentKeys)
-        let completedKeys = Set(sessions.filter { session in
-            guard session.isSubAgent else { return false }
-            guard appState.trackedSubagentKeys.contains(session.key) else { return false }
-            return isTerminalSession(session, now: now)
-        }.map { $0.key })
         appState.removeTrackedSubagents(staleKeys.union(completedKeys))
 
-        // 只显示被跟踪且仍然活跃的 subagent sessions
+        // 只显示被跟踪且仍未完成的 subagent sessions
         var activeSubs: [String: [Session]] = [:]
         for (agentId, agentSessions) in allSubagentSessions {
             let tracked = agentSessions.filter {
-                appState.trackedSubagentKeys.contains($0.key) && !isTerminalSession($0, now: now)
+                appState.trackedSubagentKeys.contains($0.key) && !completedKeys.contains($0.key)
             }
             if !tracked.isEmpty {
                 activeSubs[agentId] = tracked.sorted {
@@ -383,6 +399,7 @@ struct SidebarView: View {
         activeSubagents = activeSubs
 
         // active agent IDs: tracked subagents + standalone agent main sessions with recent activity
+        let now = Date()
         var active = Set<String>()
         for (agentId, subs) in activeSubs {
             if !subs.isEmpty { active.insert(agentId) }
@@ -398,8 +415,8 @@ struct SidebarView: View {
             if agentId == "main" && !session.key.contains(":subagent:") { continue }
             // Already marked active
             if active.contains(agentId) { continue }
-            // Completed / inactive sessions should not keep the agent marked as working
-            if isTerminalSession(session, now: now) { continue }
+            // 明确终态 / 明显非运行态的 standalone session 不应让 agent 持续显示“工作中…”
+            if isTerminalSession(session) || hasInactiveSessionStatus(session) { continue }
             // 只把“刚刚真的有活动”的 standalone agent 算作工作中，避免完成后长挂 2 分钟
             if isRecentlyActive(session, now: now) {
                 active.insert(agentId)
