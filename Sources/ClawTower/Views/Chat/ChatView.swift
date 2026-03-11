@@ -32,7 +32,7 @@ struct ChatView: View {
     @State private var isInitialLoadDone = false
     @State private var scrollTrigger = 0
     @State private var currentModel: String
-    @State private var lastUpdateTime: Date = .distantPast
+    @State private var lastDisplayMessageIDs: [String] = []
     @State private var rateLimitInfo: RateLimitInfo?
     init(agent: Agent, client: GatewayClient, sessionKey: String, injectedContext: String? = nil, appState: AppState) {
         self.agent = agent
@@ -435,9 +435,6 @@ struct ChatView: View {
 
     private func updateDisplayMessages() {
         let updateStart = CFAbsoluteTimeGetCurrent()
-        let now = Date()
-        if now.timeIntervalSince(lastUpdateTime) < 0.2 { return }
-        lastUpdateTime = now
 
         var filtered: [ChatMessage] = []
         var newCache: [String: String] = [:]
@@ -468,9 +465,19 @@ struct ChatView: View {
             newCache[message.id] = displayContent
         }
 
-        displayMessages = filtered
-        displayContentCache = newCache
-        NSLog("🔥 [UpdateDisplay] took %.1fms, count: %d", (CFAbsoluteTimeGetCurrent() - updateStart) * 1000, displayMessages.count)
+        let filteredIDs = filtered.map(\.id)
+        let didMessageListChange = filteredIDs != lastDisplayMessageIDs
+        let didCacheChange = newCache != displayContentCache
+
+        if didMessageListChange {
+            displayMessages = filtered
+            lastDisplayMessageIDs = filteredIDs
+        }
+        if didCacheChange {
+            displayContentCache = newCache
+        }
+
+        NSLog("🔥 [UpdateDisplay] took %.1fms, count: %d, changed: %d/%d", (CFAbsoluteTimeGetCurrent() - updateStart) * 1000, filtered.count, didMessageListChange ? 1 : 0, didCacheChange ? 1 : 0)
     }
 
     private func deduplicated(_ items: [ChatMessage]) -> [ChatMessage] {
@@ -956,10 +963,10 @@ private struct MessageBubble: View {
     var rateLimitInfo: RateLimitInfo? = nil
     let onToggleExpand: () -> Void
 
-    @State private var isHovering = false
     @State private var didCopy = false
     @State private var pulseOpacity = 0.25
     @State private var detectedPaths: [String] = []
+    @State private var didLoadDetectedPaths = false
 
     private var effectiveContent: String {
         displayContent ?? message.content
@@ -1106,6 +1113,13 @@ private struct MessageBubble: View {
 
             if isLeftAligned { Spacer(minLength: 60) }
         }
+        .onAppear {
+            guard !didLoadDetectedPaths else { return }
+            didLoadDetectedPaths = true
+            guard message.isAssistant else { return }
+            guard effectiveContent.contains("/") || effectiveContent.contains("~/") else { return }
+            detectedPaths = Self.extractPaths(from: effectiveContent)
+        }
     }
 
     @ViewBuilder
@@ -1178,12 +1192,9 @@ private struct MessageBubble: View {
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .opacity(isHovering || didCopy ? 1 : 0)
+                .opacity(didCopy ? 1 : 0.35)
                 .padding(6)
             }
-        }
-        .onHover { hovering in
-            isHovering = hovering
         }
     }
 }
