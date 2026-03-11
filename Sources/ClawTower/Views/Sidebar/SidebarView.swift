@@ -269,10 +269,51 @@ struct SidebarView: View {
         return activeAgentIDs.contains(agent.id)
     }
 
+    private func normalizedSessionStatus(_ session: Session) -> String? {
+        session.status?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private func isTerminalSession(_ session: Session, now: Date = Date()) -> Bool {
+        let terminalStatuses: Set<String> = [
+            "done", "completed", "complete", "finished", "success",
+            "failed", "error", "errored", "cancelled", "canceled",
+            "timed_out", "timeout", "killed", "stopped", "terminated"
+        ]
+        if let status = normalizedSessionStatus(session), terminalStatuses.contains(status) {
+            return true
+        }
+
+        // 部分 session 在完成后 status 不会及时落成 done/completed，
+        // 但会很快变成非活跃语义；这里把这类状态也当成已结束处理。
+        let inactiveStatuses: Set<String> = ["idle", "inactive", "closed", "exited"]
+        if let status = normalizedSessionStatus(session), inactiveStatuses.contains(status) {
+            return true
+        }
+
+        // subagent 完成后如果状态字段没及时更新，至少不能在侧栏永远挂着。
+        // 对 tracked subagent 增加一个兜底回收：长时间无更新则视为已结束。
+        if session.isSubAgent,
+           appState.trackedSubagentKeys.contains(session.key),
+           let updatedAt = session.updatedAt,
+           now.timeIntervalSince(updatedAt) > 20 {
+            return true
+        }
+
+        return false
+    }
+
+    private func isRecentlyActive(_ session: Session, now: Date = Date(), threshold: TimeInterval = 15) -> Bool {
+        guard let updatedAt = session.updatedAt else { return false }
+        return now.timeIntervalSince(updatedAt) < threshold
+    }
+
     // MARK: - Sessions
 
     private func loadSessions() async {
         guard let sessions = try? await appState.gatewayClient.listSessions(limit: 100) else { return }
+        let now = Date()
         var grouped: [String: [Session]] = [:]
         for session in sessions {
             let isCron = session.key.contains(":cron:")
@@ -315,28 +356,28 @@ struct SidebarView: View {
             previousSubagentKeys = currentSubagentKeys
         }
 
-        // 已不在 session 列表中的 key 移除跟踪
+        // 统一回收 tracked keys：
+        // 1) session 已经不在列表里
+        // 2) session 明确进入终态
+        // 3) session 长时间无更新的兜底回收，避免“工作中…”永久挂死
         let staleKeys = appState.trackedSubagentKeys.subtracting(currentSubagentKeys)
-        appState.removeTrackedSubagents(staleKeys)
-
-        // 已完成的 subagent session 也移除跟踪
         let completedKeys = Set(sessions.filter { session in
-            guard session.key.contains(":subagent:") else { return false }
+            guard session.isSubAgent else { return false }
             guard appState.trackedSubagentKeys.contains(session.key) else { return false }
-            if let status = session.status {
-                let doneStatuses = ["done", "completed", "timed_out", "killed", "error"]
-                return doneStatuses.contains(status.lowercased())
-            }
-            return false
+            return isTerminalSession(session, now: now)
         }.map { $0.key })
-        appState.removeTrackedSubagents(completedKeys)
+        appState.removeTrackedSubagents(staleKeys.union(completedKeys))
 
-        // 只显示被跟踪的 subagent sessions
+        // 只显示被跟踪且仍然活跃的 subagent sessions
         var activeSubs: [String: [Session]] = [:]
         for (agentId, agentSessions) in allSubagentSessions {
-            let tracked = agentSessions.filter { appState.trackedSubagentKeys.contains($0.key) }
+            let tracked = agentSessions.filter {
+                appState.trackedSubagentKeys.contains($0.key) && !isTerminalSession($0, now: now)
+            }
             if !tracked.isEmpty {
-                activeSubs[agentId] = tracked
+                activeSubs[agentId] = tracked.sorted {
+                    ($0.updatedAt ?? .distantPast) > ($1.updatedAt ?? .distantPast)
+                }
             }
         }
         activeSubagents = activeSubs
@@ -347,8 +388,6 @@ struct SidebarView: View {
             if !subs.isEmpty { active.insert(agentId) }
         }
         // Check standalone agent sessions (non-main agents with recent main/subagent session activity)
-        let now = Date()
-        let doneStatuses: Set<String> = ["done", "completed", "timed_out", "killed", "error"]
         for session in sessions {
             // Skip cron sessions
             if session.key.contains(":cron:") { continue }
@@ -359,11 +398,10 @@ struct SidebarView: View {
             if agentId == "main" && !session.key.contains(":subagent:") { continue }
             // Already marked active
             if active.contains(agentId) { continue }
-            // Skip completed sessions
-            if let status = session.status, doneStatuses.contains(status.lowercased()) { continue }
-            // Check if updated within 120 seconds
-            if let updatedAt = session.updatedAt,
-               now.timeIntervalSince(updatedAt) < 120 {
+            // Completed / inactive sessions should not keep the agent marked as working
+            if isTerminalSession(session, now: now) { continue }
+            // 只把“刚刚真的有活动”的 standalone agent 算作工作中，避免完成后长挂 2 分钟
+            if isRecentlyActive(session, now: now) {
                 active.insert(agentId)
             }
         }
