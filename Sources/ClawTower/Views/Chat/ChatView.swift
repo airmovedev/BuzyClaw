@@ -1130,6 +1130,37 @@ private struct MessageBubble: View {
         return standardizedPath
     }
 
+    /// Conservative whitelist: only show "Open" button for likely generated file artifacts.
+    nonisolated private static func shouldShowOpenButton(for path: String) -> Bool {
+        let normalizedPath = normalizedPathKey(for: path)
+        let ext = (normalizedPath as NSString).pathExtension.lowercased()
+
+        // No extension → skip (directories or ambiguous paths)
+        guard !ext.isEmpty else { return false }
+
+        // Trailing slash → directory → skip
+        if path.hasSuffix("/") { return false }
+
+        let allowedExtensions: Set<String> = [
+            // Documents
+            "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+            "pages", "numbers", "keynote", "rtf", "odt", "ods", "odp",
+            "csv", "tsv", "txt",
+            // Images
+            "png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
+            "tiff", "tif", "bmp", "ico", "svg",
+            // Audio/Video
+            "mp3", "mp4", "m4a", "m4v", "mov", "wav", "aac", "flac",
+            "avi", "mkv", "webm",
+            // Archives
+            "zip", "tar", "gz", "dmg", "pkg",
+            // Other artifacts
+            "html", "epub",
+        ]
+
+        return allowedExtensions.contains(ext)
+    }
+
     nonisolated fileprivate static func shouldUsePreviewOnlyRendering(for message: ChatMessage, isExpanded: Bool, isLastMessage: Bool) -> Bool {
         !message.isStreaming && !isLastMessage && message.isLong && !isExpanded
     }
@@ -1188,7 +1219,7 @@ private struct MessageBubble: View {
     }
 
     private var disablesTextSelection: Bool {
-        shouldUsePreviewOnlyRendering || message.content.count > Self.longTextSelectionThreshold || shouldRenderAsPlainText
+        shouldUsePreviewOnlyRendering
     }
 
     private var shouldShowCopyButton: Bool {
@@ -1215,8 +1246,10 @@ private struct MessageBubble: View {
                 bubbleBody
 
                 if !detectedPaths.isEmpty {
+                    let openablePaths = detectedPaths.filter { Self.shouldShowOpenButton(for: $0) }
+                    if !openablePaths.isEmpty {
                     FlowLayout(spacing: 6) {
-                        ForEach(detectedPaths, id: \.self) { path in
+                        ForEach(openablePaths, id: \.self) { path in
                             Button {
                                 let normalizedPath = Self.normalizedPathKey(for: path)
                                 NSWorkspace.shared.open(URL(fileURLWithPath: normalizedPath))
@@ -1235,6 +1268,7 @@ private struct MessageBubble: View {
                             .buttonStyle(.plain)
                             .help(path)
                         }
+                    }
                     }
                 }
 //
