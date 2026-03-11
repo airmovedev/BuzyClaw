@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 struct SkillMissing: Codable, Sendable {
     var bins: [String]
@@ -9,6 +9,26 @@ struct SkillMissing: Codable, Sendable {
 
     var isEmpty: Bool {
         bins.isEmpty && anyBins.isEmpty && env.isEmpty && config.isEmpty && os.isEmpty
+    }
+
+    var summary: String? {
+        var parts: [String] = []
+        if !bins.isEmpty {
+            parts.append("命令行工具：\(bins.joined(separator: ", "))")
+        }
+        if !anyBins.isEmpty {
+            parts.append("可选工具（任一）：\(anyBins.joined(separator: ", "))")
+        }
+        if !env.isEmpty {
+            parts.append("环境变量：\(env.joined(separator: ", "))")
+        }
+        if !config.isEmpty {
+            parts.append("配置项：\(config.joined(separator: ", "))")
+        }
+        if !os.isEmpty {
+            parts.append("系统限制：\(os.joined(separator: ", "))")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
@@ -27,6 +47,8 @@ struct Skill: Identifiable, Codable, Sendable {
     var id: String { name }
 
     var displayEmoji: String { emoji ?? "📦" }
+    var canBeEnabled: Bool { eligible && !blockedByAllowlist }
+    var missingSummary: String? { missing.summary }
 
     var sourceLabel: String {
         switch source {
@@ -45,6 +67,32 @@ struct Skill: Identifiable, Codable, Sendable {
         if disabled { return .disabled }
         if !eligible { return .missingDeps }
         return .ready
+    }
+
+    var onboardingStatusText: String {
+        if blockedByAllowlist {
+            return "当前环境未开放此技能"
+        }
+        switch status {
+        case .ready:
+            return disabled ? "可启用" : "已启用"
+        case .missingDeps:
+            return "缺少依赖，暂时不能启用"
+        case .disabled:
+            return canBeEnabled ? "可启用" : "暂时不可启用"
+        }
+    }
+
+    var onboardingStatusColor: Color {
+        if blockedByAllowlist {
+            return .orange
+        }
+        switch status {
+        case .ready:
+            return .green
+        case .missingDeps, .disabled:
+            return canBeEnabled ? .secondary : .orange
+        }
     }
 }
 

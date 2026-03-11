@@ -6,6 +6,7 @@ final class SkillsService {
     private(set) var skills: [Skill] = []
     private(set) var isLoading = false
     private(set) var errorMessage: String?
+    private var configDirectoryOverride: URL?
 
     private struct RuntimeCommand {
         let executable: URL
@@ -26,11 +27,14 @@ final class SkillsService {
             }
         }
 
-        // Dev fallback
         return RuntimeCommand(
             executable: URL(fileURLWithPath: "/usr/local/bin/node"),
             arguments: ["/usr/local/lib/node_modules/openclaw/openclaw.mjs", "skills", "list", "--json"]
         )
+    }
+
+    func configure(configDirectory: URL?) {
+        configDirectoryOverride = configDirectory
     }
 
     func loadSkills() async {
@@ -56,7 +60,6 @@ final class SkillsService {
                 return
             }
 
-            // Find first '{' to skip any non-JSON prefix
             guard let startIndex = data.firstIndex(of: UInt8(ascii: "{")) else {
                 errorMessage = "无法解析 JSON 输出"
                 return
@@ -71,10 +74,11 @@ final class SkillsService {
     }
 
     func setSkillEnabled(name: String, enabled: Bool) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = home.appendingPathComponent(".openclaw/openclaw.json")
+        let configURL = resolvedConfigDirectory().appendingPathComponent("openclaw.json")
 
         do {
+            try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+
             var json: [String: Any] = [:]
             if let data = try? Data(contentsOf: configURL),
                let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -92,13 +96,18 @@ final class SkillsService {
             let outputData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
             try outputData.write(to: configURL, options: .atomic)
 
-            // Update local state
             if let idx = skills.firstIndex(where: { $0.name == name }) {
                 skills[idx].disabled = !enabled
-                skills[idx].eligible = enabled && skills[idx].missing.isEmpty
             }
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func resolvedConfigDirectory() -> URL {
+        if let configDirectoryOverride {
+            return configDirectoryOverride
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw")
     }
 }

@@ -2,6 +2,31 @@ import SwiftUI
 
 struct OnboardingView: View {
     let appState: AppState
+
+    private enum AuthFlow: Hashable {
+        case anthropicAPIKey
+        case anthropicSetupToken
+        case openAIAPIKey
+        case openAIOAuth
+        case minimaxAPIKey
+        case minimaxOAuth
+        case kimiAPIKey
+        case zaiAPIKey
+        case qwenAPIKey
+        case googleAPIKey
+        case xaiAPIKey
+        case openRouterAPIKey
+    }
+
+    private struct ProviderOption: Identifiable {
+        let provider: AuthService.Provider
+        let name: String
+        let subtitle: String
+        let description: String
+
+        var id: AuthService.Provider { provider }
+    }
+
     @State private var currentStep = 0
     @State private var agentName = "Assistant"
     @State private var agentEmoji = "🤖"
@@ -11,8 +36,10 @@ struct OnboardingView: View {
     @State private var selectedProvider: AuthService.Provider?
     @State private var apiKeyInput = ""
     @State private var setupTokenInput = ""
-    @State private var claudeAuthMethod = 0
-    @State private var minimaxAuthMethod = 0 // 0 = API Key, 1 = OAuth
+    @State private var activeAuthFlow: AuthFlow?
+
+    @State private var skillsService = SkillsService()
+    @State private var didLoadSkills = false
 
     // Detection step state
     @State private var existingInstallDetected = false
@@ -31,14 +58,29 @@ struct OnboardingView: View {
     @State private var customOccupation: String = ""
     @State private var selectedScenarios: Set<String> = []
 
-    // Step 6: Tools profile
+    // Step 7: Tools profile
     @State private var selectedToolsProfile: String = "full"
 
-    private let totalSteps = 8
+    // Step 8: Permissions
+    @State private var permissionStatus: [PermissionCapability: Bool] = [:]
+    @State private var pendingPermission: PermissionCapability?
+
+    private let totalSteps = 10
+
+    private let providerOptions: [ProviderOption] = [
+        .init(provider: .anthropic, name: "Claude", subtitle: "Anthropic", description: "最擅长写作和分析"),
+        .init(provider: .openai, name: "ChatGPT", subtitle: "OpenAI", description: "最擅长代码和推理"),
+        .init(provider: .minimax, name: "MiniMax", subtitle: "MiniMax", description: "国产大模型领先者"),
+        .init(provider: .kimi, name: "Kimi", subtitle: "Moonshot AI", description: "擅长长文本理解"),
+        .init(provider: .zai, name: "智谱 GLM", subtitle: "Z.AI", description: "国产旗舰大模型"),
+        .init(provider: .qwen, name: "通义千问", subtitle: "Alibaba", description: "阿里巴巴大模型"),
+        .init(provider: .google, name: "Gemini", subtitle: "Google", description: "Google 旗舰大模型"),
+        .init(provider: .xai, name: "Grok", subtitle: "xAI", description: "Elon Musk 的 AI"),
+        .init(provider: .openrouter, name: "OpenRouter", subtitle: "多模型路由", description: "一个 Key 用所有模型")
+    ]
 
     var body: some View {
         VStack(spacing: 0) {
-            // Progress bar
             HStack(spacing: 4) {
                 ForEach(0..<totalSteps, id: \.self) { step in
                     RoundedRectangle(cornerRadius: 2)
@@ -51,7 +93,6 @@ struct OnboardingView: View {
 
             Spacer()
 
-            // Step content
             Group {
                 switch currentStep {
                 case 0: welcomeStep
@@ -60,33 +101,34 @@ struct OnboardingView: View {
                 case 3: personalityStep
                 case 4: userInfoStep
                 case 5: providerStep
-                case 6: toolsProfileStep
-                case 7: readyStep
+                case 6: skillsStep
+                case 7: toolsProfileStep
+                case 8: permissionsStep
+                case 9: readyStep
                 default: EmptyView()
                 }
             }
-            .frame(maxWidth: 500)
+            .frame(maxWidth: 560)
 
             Spacer()
 
-            // Navigation
             HStack {
                 if currentStep > 0 && currentStep != 1 {
                     Button("上一步") {
-                        if currentStep == 7 && appState.gatewayMode == .existingInstall {
+                        if currentStep == 9 && appState.gatewayMode == .existingInstall {
                             currentStep = 1
                             return
                         }
                         if currentStep == 5 {
-                            authService.reset()
-                            selectedProvider = nil
-                            apiKeyInput = ""
+                            resetProviderSelection()
                         }
                         currentStep -= 1
                     }
                     .buttonStyle(.plain)
                 }
+
                 Spacer()
+
                 if currentStep == 1 {
                     EmptyView()
                 } else if currentStep < totalSteps - 1 {
@@ -118,7 +160,7 @@ struct OnboardingView: View {
             }
             .padding(30)
         }
-        .frame(minWidth: 600, minHeight: 500)
+        .frame(minWidth: 640, minHeight: 560)
     }
 
     private var canAdvance: Bool {
@@ -129,6 +171,44 @@ struct OnboardingView: View {
         case 5: return authService.isAuthenticated
         default: return true
         }
+    }
+
+    private var selectedProviderName: String {
+        providerOptions.first(where: { $0.provider == selectedProvider })?.name ?? ""
+    }
+
+    private var currentAuthState: AuthService.AuthState? {
+        guard let activeAuthFlow else { return nil }
+        return stateForActiveFlow(activeAuthFlow)
+    }
+
+    private func stateForActiveFlow(_ flow: AuthFlow) -> AuthService.AuthState? {
+        activeAuthFlow == flow ? authService.state : nil
+    }
+
+    private func configHomeDir() -> String? {
+        appState.gatewayMode == .freshInstall ? appState.openclawBasePath.path : nil
+    }
+
+    private func resetProviderSelection() {
+        authService.reset()
+        selectedProvider = nil
+        apiKeyInput = ""
+        setupTokenInput = ""
+        activeAuthFlow = nil
+    }
+
+    private func selectProvider(_ provider: AuthService.Provider) {
+        guard !authService.isAuthenticated else { return }
+        resetProviderSelection()
+        selectedProvider = provider
+    }
+
+    private func ensureSkillsLoaded() async {
+        guard !didLoadSkills else { return }
+        didLoadSkills = true
+        skillsService.configure(configDirectory: appState.openclawBasePath)
+        await skillsService.loadSkills()
     }
 
     // MARK: - Step 0: Welcome
@@ -181,7 +261,7 @@ struct OnboardingView: View {
                 VStack(spacing: 12) {
                     Button {
                         appState.gatewayMode = .existingInstall
-                        currentStep = existingAuthDetected ? 7 : 5
+                        currentStep = existingAuthDetected ? 9 : 5
                     } label: {
                         HStack {
                             Image(systemName: "arrow.right.circle.fill")
@@ -235,7 +315,6 @@ struct OnboardingView: View {
             if let contents = try? FileManager.default.contentsOfDirectory(atPath: agentsDir.path) {
                 detectedAgentCount = contents.filter { !$0.hasPrefix(".") }.count
             }
-            // Check if auth.profiles exists and is non-empty
             if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let auth = json["auth"] as? [String: Any],
@@ -291,7 +370,6 @@ struct OnboardingView: View {
                 Text("TA 的性格是？")
                     .font(.title2.bold())
 
-                // 1. Speaking style (4 choices)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("说话风格")
                         .font(.headline)
@@ -301,7 +379,6 @@ struct OnboardingView: View {
                     personalityCard(id: "rational", emoji: "📚", title: "沉稳理性", desc: "客观冷静，逻辑导向")
                 }
 
-                // 2. Proactiveness (3 choices)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("主动程度")
                         .font(.headline)
@@ -317,7 +394,6 @@ struct OnboardingView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // 3. Feedback style (2 choices)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("犯错提醒方式")
                         .font(.headline)
@@ -379,7 +455,6 @@ struct OnboardingView: View {
                 Text("让合伙人了解你")
                     .font(.title2.bold())
 
-                // 1. Name
                 VStack(alignment: .leading, spacing: 6) {
                     Text("你的称呼")
                         .font(.headline)
@@ -387,7 +462,6 @@ struct OnboardingView: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                // 2. Schedule
                 VStack(alignment: .leading, spacing: 10) {
                     Text("作息习惯")
                         .font(.headline)
@@ -399,7 +473,6 @@ struct OnboardingView: View {
                     .pickerStyle(.segmented)
                 }
 
-                // 3. Occupation tags
                 VStack(alignment: .leading, spacing: 10) {
                     Text("职业/身份")
                         .font(.headline)
@@ -420,7 +493,6 @@ struct OnboardingView: View {
                     }
                 }
 
-                // 4. Scenarios (at least 1)
                 VStack(alignment: .leading, spacing: 10) {
                     Text("使用场景（至少选 1 个）")
                         .font(.headline)
@@ -473,106 +545,72 @@ struct OnboardingView: View {
             VStack(spacing: 20) {
                 Text("连接你的 AI 大脑")
                     .font(.title2.bold())
-                Text("选择一个 AI 服务来连接")
+                Text("先选模型，再在同一页完成对应认证")
                     .foregroundStyle(.secondary)
 
-                let columns = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
-                LazyVGrid(columns: columns, spacing: 16) {
-                    providerCard(
-                        provider: .anthropic,
-                        name: "Claude",
-                        subtitle: "Anthropic",
-                        description: "最擅长写作和分析",
-                        icon: "brain.head.profile",
-                        tint: .purple
-                    )
-                    providerCard(
-                        provider: .openai,
-                        name: "ChatGPT",
-                        subtitle: "OpenAI",
-                        description: "最擅长代码和推理",
-                        icon: "bubble.left.and.bubble.right",
-                        tint: .green
-                    )
-                    providerCard(
-                        provider: .minimax,
-                        name: "MiniMax",
-                        subtitle: "MiniMax",
-                        description: "国产大模型领先者",
-                        icon: "sparkles",
-                        tint: .orange
-                    )
-                    providerCard(
-                        provider: .kimi,
-                        name: "Kimi",
-                        subtitle: "Moonshot AI",
-                        description: "擅长长文本理解",
-                        icon: "moon.stars",
-                        tint: .blue
-                    )
-                    providerCard(
-                        provider: .zai,
-                        name: "智谱 GLM",
-                        subtitle: "Z.AI",
-                        description: "国产旗舰大模型",
-                        icon: "text.word.spacing",
-                        tint: .cyan
-                    )
-                    providerCard(
-                        provider: .qwen,
-                        name: "通义千问",
-                        subtitle: "Alibaba",
-                        description: "阿里巴巴大模型",
-                        icon: "cloud",
-                        tint: .indigo
-                    )
-                    providerCard(
-                        provider: .google,
-                        name: "Gemini",
-                        subtitle: "Google",
-                        description: "Google 旗舰大模型",
-                        icon: "globe",
-                        tint: .red
-                    )
-                    providerCard(
-                        provider: .xai,
-                        name: "Grok",
-                        subtitle: "xAI",
-                        description: "Elon Musk 的 AI",
-                        icon: "bolt",
-                        tint: .gray
-                    )
-                    providerCard(
-                        provider: .openrouter,
-                        name: "OpenRouter",
-                        subtitle: "多模型路由",
-                        description: "一个 Key 用所有模型",
-                        icon: "arrow.triangle.branch",
-                        tint: .mint
-                    )
+                VStack(spacing: 10) {
+                    ForEach(providerOptions) { option in
+                        providerRow(option)
+                    }
                 }
 
                 if let provider = selectedProvider {
-                    Group {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("\(selectedProviderName) 认证")
+                            .font(.headline)
+
                         switch provider {
                         case .anthropic:
-                            anthropicAuthSection
+                            VStack(spacing: 12) {
+                                authMethodGroup(title: "API Key") {
+                                    keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
+                                }
+                                authMethodGroup(title: "Setup Token") {
+                                    setupTokenSection
+                                }
+                            }
                         case .openai:
-                            oauthSection
+                            VStack(spacing: 12) {
+                                authMethodGroup(title: "API Key") {
+                                    keyInputSection(provider: .openai, flow: .openAIAPIKey)
+                                }
+                                authMethodGroup(title: "OAuth 登录") {
+                                    openAIOAuthSection
+                                }
+                            }
                         case .minimax:
-                            minimaxAuthSection
+                            VStack(spacing: 12) {
+                                authMethodGroup(title: "API Key") {
+                                    minimaxKeyInputSection
+                                }
+                                authMethodGroup(title: "OAuth 登录") {
+                                    minimaxOAuthSection
+                                }
+                            }
                         case .kimi:
-                            kimiAuthSection
+                            authMethodGroup(title: "API Key") {
+                                kimiAuthSection
+                            }
                         case .zai:
-                            genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan)
+                            authMethodGroup(title: "API Key") {
+                                genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan, flow: .zaiAPIKey)
+                            }
                         case .qwen:
-                            genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo)
+                            authMethodGroup(title: "API Key") {
+                                genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo, flow: .qwenAPIKey)
+                            }
                         case .google:
-                            genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red)
+                            authMethodGroup(title: "API Key") {
+                                genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red, flow: .googleAPIKey)
+                            }
                         case .xai:
-                            genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray)
+                            authMethodGroup(title: "API Key") {
+                                genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray, flow: .xaiAPIKey)
+                            }
                         case .openrouter:
-                            genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint)
+                            authMethodGroup(title: "API Key") {
+                                genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint, flow: .openRouterAPIKey)
+                            }
                         }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -583,80 +621,183 @@ struct OnboardingView: View {
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
     }
 
-    private func providerCard(
-        provider: AuthService.Provider,
-        name: String,
-        subtitle: String,
-        description: String,
-        icon: String,
-        tint: Color
-    ) -> some View {
-        let isSelected = selectedProvider == provider
+    private func providerRow(_ option: ProviderOption) -> some View {
+        let isSelected = selectedProvider == option.provider
 
         return Button {
-            guard !authService.isAuthenticated else { return }
-            authService.reset()
-            apiKeyInput = ""
-            selectedProvider = provider
+            selectProvider(option.provider)
         } label: {
-            VStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 32))
-                    .foregroundStyle(tint)
-                Text(name)
-                    .font(.title3.bold())
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(description)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(option.name)
+                            .font(.headline)
+                        Text(option.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(option.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if authService.isAuthenticated && isSelected {
+                    Label("已验证", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                } else if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
             }
-            .frame(maxWidth: .infinity)
-            .frame(height: 140)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? tint.opacity(0.1) : Color(.controlBackgroundColor))
+                    .fill(isSelected ? Color.accentColor.opacity(0.08) : Color(.controlBackgroundColor))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? tint : Color.clear, lineWidth: 2)
+                    .stroke(isSelected ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.12), lineWidth: isSelected ? 2 : 1)
             )
-            .overlay(alignment: .topTrailing) {
-                if authService.isAuthenticated && isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.title2)
-                        .padding(8)
-                }
-            }
         }
         .buttonStyle(.plain)
         .disabled(authService.isAuthenticated)
     }
 
-    // MARK: - Anthropic Auth Section
+    private func authMethodGroup<Content: View>(title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.controlBackgroundColor))
+        )
+    }
 
-    private var anthropicAuthSection: some View {
-        VStack(spacing: 16) {
-            Picker("认证方式", selection: $claudeAuthMethod) {
-                Text("API Key").tag(0)
-                Text("Setup Token").tag(1)
+    // MARK: - Step 6: Skills
+
+    private var skillsStep: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("安装常用技能")
+                            .font(.title2.bold())
+                        Text("先把想用的技能勾上；缺依赖的会明确标出来。也可以先跳过，后面再配。")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("跳过") {
+                        currentStep += 1
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if skillsService.isLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("正在加载技能列表...")
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 32)
+                } else if let error = skillsService.errorMessage {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Button("重试") {
+                            Task { await skillsService.loadSkills() }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.orange.opacity(0.08))
+                    )
+                } else if skillsService.skills.isEmpty {
+                    Text("当前没有可展示的技能。")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 24)
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(skillsService.skills) { skill in
+                            onboardingSkillRow(skill)
+                        }
+                    }
+                }
             }
-            .pickerStyle(.segmented)
-            .disabled(authService.isAuthenticated)
-            .onChange(of: claudeAuthMethod) {
-                if !authService.isAuthenticated {
-                    authService.reset()
+            .padding(.vertical, 8)
+        }
+        .task {
+            await ensureSkillsLoaded()
+        }
+    }
+
+    private func onboardingSkillRow(_ skill: Skill) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(skill.displayEmoji)
+                        .font(.title3)
+                    Text(skill.name)
+                        .font(.headline)
+                    Text(skill.sourceLabel)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+
+                if let description = skill.description {
+                    Text(description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Text(skill.onboardingStatusText)
+                    .font(.caption)
+                    .foregroundStyle(skill.onboardingStatusColor)
+
+                if let detail = skill.missingSummary {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            if claudeAuthMethod == 0 {
-                keyInputSection(provider: .anthropic)
-            } else {
-                setupTokenSection
-            }
+            Spacer(minLength: 12)
+
+            Toggle("", isOn: Binding(
+                get: { !skill.disabled },
+                set: { newValue in
+                    skillsService.setSkillEnabled(name: skill.name, enabled: newValue)
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .disabled(!skill.canBeEnabled)
         }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(skill.canBeEnabled ? Color.secondary.opacity(0.12) : Color.orange.opacity(0.25), lineWidth: 1)
+        )
     }
 
     // MARK: - Setup Token Section
@@ -706,12 +847,13 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
-                    let homeDir: String? = appState.gatewayMode == .freshInstall
-                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-                        : nil
-                    authService.verifyAnthropicSetupToken(token: setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                    activeAuthFlow = .anthropicSetupToken
+                    authService.verifyAnthropicSetupToken(
+                        token: setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                        homeDir: configHomeDir()
+                    )
                 } label: {
-                    switch authService.state {
+                    switch stateForActiveFlow(.anthropicSetupToken) {
                     case .verifying:
                         ProgressView()
                             .controlSize(.small)
@@ -728,59 +870,31 @@ struct OnboardingView: View {
                 .disabled(setupTokenInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            switch authService.state {
-            case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("Setup Token 验证成功！点击「下一步」继续")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption)
-            case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-            default:
-                EmptyView()
-            }
+            authFeedback(flow: .anthropicSetupToken, success: "Setup Token 验证成功！点击「下一步」继续")
 
             Text("Token 仅存储在你的 Mac 上，不会上传到任何服务器")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     // MARK: - OpenAI OAuth Section
 
-    private var oauthSection: some View {
-        let oauthHomeDir: String? = appState.gatewayMode == .freshInstall
-            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-            : nil
-        return VStack(spacing: 16) {
-            switch authService.state {
+    private var openAIOAuthSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            switch stateForActiveFlow(.openAIOAuth) ?? .idle {
             case .idle:
                 Button("使用 OpenAI 账号登录") {
-                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
+                    activeAuthFlow = .openAIOAuth
+                    authService.authenticateOpenAIOAuth(homeDir: configHomeDir())
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
             case .launching:
-                Button("使用 OpenAI 账号登录") {
-                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(true)
+                Button("使用 OpenAI 账号登录") {}
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(true)
 
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -789,33 +903,25 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
             case .waitingForBrowser(let url):
-                VStack(spacing: 8) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("请在浏览器中完成登录...")
-                            .foregroundStyle(.secondary)
-                    }
-                    .font(.callout)
-
-                    Button("打开浏览器") {
-                        if let browserURL = URL(string: url) {
-                            NSWorkspace.shared.open(browserURL)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.green)
-                    .controlSize(.small)
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("请在浏览器中完成登录...")
+                        .foregroundStyle(.secondary)
                 }
+                .font(.callout)
+
+                Button("打开浏览器") {
+                    if let browserURL = URL(string: url) {
+                        NSWorkspace.shared.open(browserURL)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(.green)
+                .controlSize(.small)
             case .waitingForCode:
                 EmptyView()
             case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("授权成功")
-                        .foregroundStyle(.green)
-                }
-                .font(.callout)
+                authSuccessLabel("授权成功")
             case .verifying:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -824,16 +930,10 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
             case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-
+                authErrorLabel(message)
                 Button("重试") {
-                    authService.authenticateOpenAIOAuth(homeDir: oauthHomeDir)
+                    activeAuthFlow = .openAIOAuth
+                    authService.authenticateOpenAIOAuth(homeDir: configHomeDir())
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -841,36 +941,9 @@ struct OnboardingView: View {
                 EmptyView()
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     // MARK: - MiniMax Auth Section
-
-    private var minimaxAuthSection: some View {
-        VStack(spacing: 16) {
-            Picker("认证方式", selection: $minimaxAuthMethod) {
-                Text("API Key").tag(0)
-                Text("OAuth 登录").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .disabled(authService.isAuthenticated)
-            .onChange(of: minimaxAuthMethod) {
-                if !authService.isAuthenticated {
-                    authService.reset()
-                }
-            }
-
-            if minimaxAuthMethod == 0 {
-                minimaxKeyInputSection
-            } else {
-                minimaxOAuthSection
-            }
-        }
-    }
 
     private var minimaxKeyInputSection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -888,12 +961,13 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
-                    let homeDir: String? = appState.gatewayMode == .freshInstall
-                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-                        : nil
-                    authService.persistMinimaxApiKey(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                    activeAuthFlow = .minimaxAPIKey
+                    authService.persistMinimaxApiKey(
+                        apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                        homeDir: configHomeDir()
+                    )
                 } label: {
-                    switch authService.state {
+                    switch stateForActiveFlow(.minimaxAPIKey) {
                     case .verifying:
                         ProgressView()
                             .controlSize(.small)
@@ -910,47 +984,21 @@ struct OnboardingView: View {
                 .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            switch authService.state {
-            case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("API Key 验证成功！点击「下一步」继续")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption)
-            case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-            default:
-                EmptyView()
-            }
+            authFeedback(flow: .minimaxAPIKey, success: "API Key 验证成功！点击「下一步」继续")
 
             Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     private var minimaxOAuthSection: some View {
-        let oauthHomeDir: String? = appState.gatewayMode == .freshInstall
-            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-            : nil
-        return VStack(spacing: 16) {
-            switch authService.state {
+        VStack(alignment: .leading, spacing: 12) {
+            switch stateForActiveFlow(.minimaxOAuth) ?? .idle {
             case .idle:
                 Button("使用 MiniMax 账号登录") {
-                    authService.authenticateMinimaxOAuth(homeDir: oauthHomeDir)
+                    activeAuthFlow = .minimaxOAuth
+                    authService.authenticateMinimaxOAuth(homeDir: configHomeDir())
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
@@ -962,38 +1010,36 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
             case .waitingForCode(let url, let code):
-                VStack(spacing: 12) {
-                    Text("请在浏览器中输入以下代码完成授权")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-
-                    Text(code)
-                        .font(.system(size: 32, weight: .bold, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(
-                            RoundedRectangle(cornerRadius: 10)
-                                .fill(Color(.textBackgroundColor))
-                        )
-
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("等待授权...")
-                            .foregroundStyle(.secondary)
-                    }
+                Text("请在浏览器中输入以下代码完成授权")
                     .font(.callout)
+                    .foregroundStyle(.secondary)
 
-                    Button("重新打开浏览器") {
-                        if let browserURL = URL(string: url) {
-                            NSWorkspace.shared.open(browserURL)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.orange)
-                    .controlSize(.small)
+                Text(code)
+                    .font(.system(size: 32, weight: .bold, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color(.textBackgroundColor))
+                    )
+
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("等待授权...")
+                        .foregroundStyle(.secondary)
                 }
-            case .waitingForBrowser(_):
+                .font(.callout)
+
+                Button("重新打开浏览器") {
+                    if let browserURL = URL(string: url) {
+                        NSWorkspace.shared.open(browserURL)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .controlSize(.small)
+            case .waitingForBrowser:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("请在浏览器中完成登录...")
@@ -1001,13 +1047,7 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
             case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("授权成功")
-                        .foregroundStyle(.green)
-                }
-                .font(.callout)
+                authSuccessLabel("授权成功")
             case .verifying:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -1016,16 +1056,10 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
             case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-
+                authErrorLabel(message)
                 Button("重试") {
-                    authService.authenticateMinimaxOAuth(homeDir: oauthHomeDir)
+                    activeAuthFlow = .minimaxOAuth
+                    authService.authenticateMinimaxOAuth(homeDir: configHomeDir())
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
@@ -1033,11 +1067,6 @@ struct OnboardingView: View {
                 EmptyView()
             }
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     // MARK: - Kimi Auth Section
@@ -1058,12 +1087,13 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
-                    let homeDir: String? = appState.gatewayMode == .freshInstall
-                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-                        : nil
-                    authService.persistMoonshotApiKey(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                    activeAuthFlow = .kimiAPIKey
+                    authService.persistMoonshotApiKey(
+                        apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                        homeDir: configHomeDir()
+                    )
                 } label: {
-                    switch authService.state {
+                    switch stateForActiveFlow(.kimiAPIKey) {
                     case .verifying:
                         ProgressView()
                             .controlSize(.small)
@@ -1080,41 +1110,24 @@ struct OnboardingView: View {
                 .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            switch authService.state {
-            case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("API Key 验证成功！点击「下一步」继续")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption)
-            case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-            default:
-                EmptyView()
-            }
+            authFeedback(flow: .kimiAPIKey, success: "API Key 验证成功！点击「下一步」继续")
 
             Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     // MARK: - Generic API Key Auth Section
 
-    private func genericApiKeyAuthSection(provider: AuthService.Provider, providerName: String, consoleName: String, consoleURL: String, tint: Color) -> some View {
+    private func genericApiKeyAuthSection(
+        provider: AuthService.Provider,
+        providerName: String,
+        consoleName: String,
+        consoleURL: String,
+        tint: Color,
+        flow: AuthFlow
+    ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("输入 \(providerName) API Key：")
                 .font(.headline)
@@ -1146,12 +1159,14 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
-                    let homeDir: String? = appState.gatewayMode == .freshInstall
-                        ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-                        : nil
-                    authService.persistGenericApiKey(provider: provider, apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), homeDir: homeDir)
+                    activeAuthFlow = flow
+                    authService.persistGenericApiKey(
+                        provider: provider,
+                        apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                        homeDir: configHomeDir()
+                    )
                 } label: {
-                    switch authService.state {
+                    switch stateForActiveFlow(flow) {
                     case .verifying:
                         ProgressView()
                             .controlSize(.small)
@@ -1168,8 +1183,7 @@ struct OnboardingView: View {
                 .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            // Model selection for Qwen (after key verification)
-            if provider == .qwen && authService.state == .modelSelection {
+            if provider == .qwen && stateForActiveFlow(flow) == .modelSelection {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("选择模型：")
                         .font(.subheadline.bold())
@@ -1186,25 +1200,21 @@ struct OnboardingView: View {
 
                     Button("确认") {
                         guard let modelId = authService.selectedModelId else { return }
-                        let homeDir: String? = appState.gatewayMode == .freshInstall
-                            ? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("ClawTower").path
-                            : nil
-                        authService.persistQwenWithSelectedModel(apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines), modelId: modelId, homeDir: homeDir)
+                        activeAuthFlow = flow
+                        authService.persistQwenWithSelectedModel(
+                            apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                            modelId: modelId,
+                            homeDir: configHomeDir()
+                        )
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(tint)
                 }
             }
 
-            switch authService.state {
+            switch stateForActiveFlow(flow) {
             case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("API Key 验证成功！点击「下一步」继续")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption)
+                authSuccessLabel("API Key 验证成功！点击「下一步」继续")
             case .modelSelection:
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
@@ -1214,13 +1224,7 @@ struct OnboardingView: View {
                 }
                 .font(.caption)
             case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
+                authErrorLabel(message)
             default:
                 EmptyView()
             }
@@ -1229,16 +1233,11 @@ struct OnboardingView: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
     }
 
     // MARK: - Key Input Section
 
-    private func keyInputSection(provider: AuthService.Provider) -> some View {
+    private func keyInputSection(provider: AuthService.Provider, flow: AuthFlow) -> some View {
         let isAnthropic = provider == .anthropic
         let tint: Color = isAnthropic ? .purple : .green
         let consoleName = isAnthropic ? "console.anthropic.com" : "platform.openai.com"
@@ -1291,9 +1290,10 @@ struct OnboardingView: View {
                     .disabled(authService.isAuthenticated)
 
                 Button {
+                    activeAuthFlow = flow
                     authService.verifyKey(provider: provider, apiKey: apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines))
                 } label: {
-                    switch authService.state {
+                    switch stateForActiveFlow(flow) {
                     case .verifying:
                         ProgressView()
                             .controlSize(.small)
@@ -1310,36 +1310,44 @@ struct OnboardingView: View {
                 .disabled(apiKeyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || authService.state == .verifying || authService.isAuthenticated)
             }
 
-            switch authService.state {
-            case .verified:
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("API Key 验证成功！点击「下一步」继续")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption)
-            case .error(let message):
-                HStack(spacing: 6) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.red)
-                    Text(message)
-                        .foregroundStyle(.red)
-                }
-                .font(.caption)
-            default:
-                EmptyView()
-            }
+            authFeedback(flow: flow, success: "API Key 验证成功！点击「下一步」继续")
 
             Text("API Key 仅存储在你的 Mac 上，不会上传到任何服务器")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.textBackgroundColor).opacity(0.5))
-        )
+    }
+
+    @ViewBuilder
+    private func authFeedback(flow: AuthFlow, success: String) -> some View {
+        switch stateForActiveFlow(flow) {
+        case .verified:
+            authSuccessLabel(success)
+        case .error(let message):
+            authErrorLabel(message)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func authSuccessLabel(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            Text(text)
+                .foregroundStyle(.green)
+        }
+        .font(.caption)
+    }
+
+    private func authErrorLabel(_ message: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .foregroundStyle(.red)
+        }
+        .font(.caption)
     }
 
     private func stepBadge(number: Int, tint: Color) -> some View {
@@ -1350,7 +1358,7 @@ struct OnboardingView: View {
             .background(Circle().fill(tint))
     }
 
-    // MARK: - Step 6: Tools Profile
+    // MARK: - Step 7: Tools Profile
 
     private var toolsProfileStep: some View {
         VStack(spacing: 20) {
@@ -1418,7 +1426,87 @@ struct OnboardingView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Step 7: Ready
+    // MARK: - Step 8: Permissions
+
+    private var permissionsStep: some View {
+        VStack(spacing: 20) {
+            Text("授权系统权限")
+                .font(.title2.bold())
+            Text("允许以下权限以获得完整体验（可跳过）")
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 10) {
+                ForEach(PermissionCapability.allCases) { cap in
+                    permissionRow(cap)
+                }
+            }
+
+            Button {
+                Task {
+                    permissionStatus = await PermissionManager.shared.status()
+                }
+            } label: {
+                Label("刷新状态", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+
+            Text("所有权限均可在系统设置中随时修改")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .task {
+            permissionStatus = await PermissionManager.shared.status()
+        }
+    }
+
+    private func permissionRow(_ cap: PermissionCapability) -> some View {
+        let granted = permissionStatus[cap] ?? false
+        let isPending = pendingPermission == cap
+
+        return HStack(spacing: 12) {
+            Image(systemName: cap.icon)
+                .font(.title2)
+                .foregroundStyle(.secondary)
+                .frame(width: 32)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(cap.title).font(.headline)
+                Text(cap.subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if granted {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.title3)
+            } else if isPending {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button("授权") {
+                    pendingPermission = cap
+                    Task {
+                        _ = await PermissionManager.shared.grant(cap)
+                        try? await Task.sleep(for: .seconds(1))
+                        permissionStatus = await PermissionManager.shared.status()
+                        pendingPermission = nil
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(granted ? Color.green.opacity(0.05) : Color(.controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(granted ? Color.green.opacity(0.3) : .clear, lineWidth: 1)
+        )
+    }
+
+    // MARK: - Step 9: Ready
 
     private var readyStep: some View {
         VStack(spacing: 20) {
