@@ -368,6 +368,31 @@ final class AuthService {
         }
     }
 
+    nonisolated private static func sendHTMLResponse(
+        on connection: NWConnection,
+        status: String,
+        title: String,
+        message: String,
+        completion: @escaping @Sendable (NWError?) -> Void
+    ) {
+        let html = """
+        <!doctype html>
+        <html>
+        <head><meta charset="utf-8"><title>\(title)</title></head>
+        <body><p>\(message)</p></body>
+        </html>
+        """
+        let response =
+            "HTTP/1.1 \(status)\r\n" +
+            "Content-Type: text/html; charset=utf-8\r\n" +
+            "Content-Length: \(html.utf8.count)\r\n" +
+            "Connection: close\r\n" +
+            "\r\n" +
+            html
+
+        connection.send(content: response.data(using: .utf8), completion: .contentProcessed(completion))
+    }
+
     nonisolated private static func waitForOAuthCallback(
         expectedState: String,
         authorizeURL: URL
@@ -379,8 +404,14 @@ final class AuthService {
             let listener: NWListener
             do {
                 let params = NWParameters.tcp
-                params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: 1455)
-                listener = try NWListener(using: params)
+                guard let port = NWEndpoint.Port(rawValue: 1455) else {
+                    box.resume(with: .failure(NSError(
+                        domain: "AuthService", code: -6,
+                        userInfo: [NSLocalizedDescriptionKey: "无效的本地回调端口"]
+                    )))
+                    return
+                }
+                listener = try NWListener(using: params, on: port)
             } catch {
                 box.resume(with: .failure(error))
                 return
@@ -398,16 +429,13 @@ final class AuthService {
             listener.newConnectionHandler = { connection in
                 connection.start(queue: queue)
                 connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                    defer {
-                        listener.cancel()
-                        connection.cancel()
-                    }
-
                     guard let data, let requestStr = String(data: data, encoding: .utf8) else {
                         box.resume(with: .failure(NSError(
                             domain: "AuthService", code: -2,
                             userInfo: [NSLocalizedDescriptionKey: "无法读取回调请求"]
                         )))
+                        listener.cancel()
+                        connection.cancel()
                         return
                     }
 
@@ -419,6 +447,8 @@ final class AuthService {
                             domain: "AuthService", code: -3,
                             userInfo: [NSLocalizedDescriptionKey: "无法解析回调 URL"]
                         )))
+                        listener.cancel()
+                        connection.cancel()
                         return
                     }
 
@@ -429,43 +459,67 @@ final class AuthService {
                     // Check for error
                     if let errorParam = queryItems.first(where: { $0.name == "error" })?.value {
                         let errorDesc = queryItems.first(where: { $0.name == "error_description" })?.value ?? errorParam
-                        let html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>授权失败</title></head><body><p>授权失败：\(errorDesc)</p></body></html>"
-                        let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\(html)"
-                        connection.send(content: resp.data(using: .utf8), completion: .contentProcessed({ _ in }))
-                        box.resume(with: .failure(NSError(
-                            domain: "AuthService", code: -5,
-                            userInfo: [NSLocalizedDescriptionKey: errorDesc]
-                        )))
+                        Self.sendHTMLResponse(
+                            on: connection,
+                            status: "200 OK",
+                            title: "授权失败",
+                            message: "授权失败：\(errorDesc)"
+                        ) { _ in
+                            listener.cancel()
+                            connection.cancel()
+                            box.resume(with: .failure(NSError(
+                                domain: "AuthService", code: -5,
+                                userInfo: [NSLocalizedDescriptionKey: errorDesc]
+                            )))
+                        }
                         return
                     }
 
                     guard let authCode = callbackCode, let returnedState = callbackState else {
-                        let html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>授权失败</title></head><body><p>回调参数缺失</p></body></html>"
-                        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\(html)"
-                        connection.send(content: resp.data(using: .utf8), completion: .contentProcessed({ _ in }))
-                        box.resume(with: .failure(NSError(
-                            domain: "AuthService", code: -4,
-                            userInfo: [NSLocalizedDescriptionKey: "回调缺少 code 或 state 参数"]
-                        )))
+                        Self.sendHTMLResponse(
+                            on: connection,
+                            status: "400 Bad Request",
+                            title: "授权失败",
+                            message: "回调参数缺失"
+                        ) { _ in
+                            listener.cancel()
+                            connection.cancel()
+                            box.resume(with: .failure(NSError(
+                                domain: "AuthService", code: -4,
+                                userInfo: [NSLocalizedDescriptionKey: "回调缺少 code 或 state 参数"]
+                            )))
+                        }
                         return
                     }
 
                     guard returnedState == expectedState else {
-                        let html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>授权失败</title></head><body><p>State 验证失败</p></body></html>"
-                        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\(html)"
-                        connection.send(content: resp.data(using: .utf8), completion: .contentProcessed({ _ in }))
-                        box.resume(with: .failure(NSError(
-                            domain: "AuthService", code: -5,
-                            userInfo: [NSLocalizedDescriptionKey: "State 验证失败"]
-                        )))
+                        Self.sendHTMLResponse(
+                            on: connection,
+                            status: "400 Bad Request",
+                            title: "授权失败",
+                            message: "State 验证失败"
+                        ) { _ in
+                            listener.cancel()
+                            connection.cancel()
+                            box.resume(with: .failure(NSError(
+                                domain: "AuthService", code: -5,
+                                userInfo: [NSLocalizedDescriptionKey: "State 验证失败"]
+                            )))
+                        }
                         return
                     }
 
                     // Success
-                    let html = "<!doctype html><html><head><meta charset=\"utf-8\"><title>授权成功</title></head><body><p>授权成功！请返回 ClawTower 继续。</p></body></html>"
-                    let resp = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\(html)"
-                    connection.send(content: resp.data(using: .utf8), completion: .contentProcessed({ _ in }))
-                    box.resume(with: .success(authCode))
+                    Self.sendHTMLResponse(
+                        on: connection,
+                        status: "200 OK",
+                        title: "授权成功",
+                        message: "授权成功！请返回 ClawTower 继续。"
+                    ) { _ in
+                        listener.cancel()
+                        connection.cancel()
+                        box.resume(with: .success(authCode))
+                    }
                 }
             }
 
