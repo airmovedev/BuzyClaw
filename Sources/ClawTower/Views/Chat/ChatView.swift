@@ -474,16 +474,21 @@ struct ChatView: View {
 
     private func perfRiskSummary(for message: ChatMessage, displayContent: String? = nil) -> String? {
         let resolvedContent = displayContent ?? displayContentCache[message.id] ?? chatDisplayContent(message)
-        let isTruncated = !message.isStreaming && !message.isUser && message.isLong
+        let isTruncated = !message.isStreaming && message.isLong
         let rendersAsPlainText = MessageBubble.shouldRenderAsPlainText(
             resolvedContent,
             isStreaming: message.isStreaming,
             isTruncated: isTruncated
         )
-        let isRisky = message.content.count >= Self.riskyMessageContentLengthThreshold || isTruncated || rendersAsPlainText
+        let previewOnly = MessageBubble.shouldUsePreviewOnlyRendering(
+            for: message,
+            isExpanded: false,
+            isLastMessage: false
+        )
+        let isRisky = message.content.count >= Self.riskyMessageContentLengthThreshold || isTruncated || rendersAsPlainText || previewOnly
         guard isRisky else { return nil }
         let roleLabel = message.isAssistant ? "assistant" : (message.isUser ? "user" : message.role.rawValue)
-        return "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(rendersAsPlainText ? 1 : 0) truncated=\(isTruncated ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
+        return "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(rendersAsPlainText ? 1 : 0) truncated=\(isTruncated ? 1 : 0) previewOnly=\(previewOnly ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
     }
 
     private func logScrollTo(reason: String, targetID: String) {
@@ -1063,13 +1068,22 @@ private struct MessageBubble: View {
         !isLastMessage && message.isLong && !isExpanded
     }
 
+    private static let previewOnlyCharacterLimit = 140
+    private static let previewOnlyLineLimit = 5
     private static let truncatedPreviewLength = 280
     private static let longTextSelectionThreshold = 300
     private static let copyButtonThreshold = 280
     private static let ultraLongAssistantPlainTextThreshold = 2000
 
+    private var previewOnlyContent: String {
+        Self.makePreviewSnippet(from: effectiveContent, limit: Self.previewOnlyCharacterLimit)
+    }
+
     private var renderedContent: String {
-        shouldTruncate ? String(effectiveContent.prefix(Self.truncatedPreviewLength)) + "..." : effectiveContent
+        if shouldUsePreviewOnlyRendering {
+            return previewOnlyContent
+        }
+        return shouldTruncate ? String(effectiveContent.prefix(Self.truncatedPreviewLength)) + "..." : effectiveContent
     }
 
     private var shouldRenderAsPlainText: Bool {
@@ -1115,6 +1129,24 @@ private struct MessageBubble: View {
         return paths
     }
 
+    nonisolated fileprivate static func shouldUsePreviewOnlyRendering(for message: ChatMessage, isExpanded: Bool, isLastMessage: Bool) -> Bool {
+        !message.isStreaming && !isLastMessage && message.isLong && !isExpanded
+    }
+
+    nonisolated private static func makePreviewSnippet(from content: String, limit: Int) -> String {
+        let collapsedWhitespace = content
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard collapsedWhitespace.count > limit else { return collapsedWhitespace }
+        return String(collapsedWhitespace.prefix(limit)) + "…"
+    }
+
     nonisolated fileprivate static func shouldRenderAsPlainText(_ content: String, isStreaming: Bool, isTruncated: Bool) -> Bool {
         if isStreaming || isTruncated { return true }
         if content.count > 4000 { return true }
@@ -1142,8 +1174,12 @@ private struct MessageBubble: View {
         message.isAssistant ? "assistant" : (message.isUser ? "user" : message.role.rawValue)
     }
 
+    private var shouldUsePreviewOnlyRendering: Bool {
+        Self.shouldUsePreviewOnlyRendering(for: message, isExpanded: isExpanded, isLastMessage: isLastMessage)
+    }
+
     private var perfSummary: String {
-        "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(shouldRenderAsPlainText ? 1 : 0) truncated=\(shouldTruncate ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
+        "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(shouldRenderAsPlainText ? 1 : 0) truncated=\(shouldTruncate ? 1 : 0) previewOnly=\(shouldUsePreviewOnlyRendering ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
     }
 
     private var isPerfRisky: Bool {
@@ -1151,11 +1187,11 @@ private struct MessageBubble: View {
     }
 
     private var disablesTextSelection: Bool {
-        message.content.count > Self.longTextSelectionThreshold || shouldRenderAsPlainText
+        shouldUsePreviewOnlyRendering || message.content.count > Self.longTextSelectionThreshold || shouldRenderAsPlainText
     }
 
     private var shouldShowCopyButton: Bool {
-        message.isAssistant && !message.isStreaming && message.content.count <= Self.copyButtonThreshold && !shouldTruncate
+        message.isAssistant && !message.isStreaming && message.content.count <= Self.copyButtonThreshold && !shouldTruncate && !shouldUsePreviewOnlyRendering
     }
 
     private var shouldUseMinimalAssistantBubbleStyle: Bool {
@@ -1247,6 +1283,7 @@ private struct MessageBubble: View {
             guard !didLoadDetectedPaths else { return }
             didLoadDetectedPaths = true
             guard message.isAssistant else { return }
+            guard !shouldUsePreviewOnlyRendering else { return }
             guard effectiveContent.contains("/") || effectiveContent.contains("~/") else { return }
             detectedPaths = Self.extractPaths(from: effectiveContent)
         }
@@ -1257,12 +1294,21 @@ private struct MessageBubble: View {
         let showTruncateButton = !isLastMessage && message.isLong
         let content = renderedContent
         let _ = isPerfRisky ? perfLog("bubble render path \(perfSummary)") : ()
+        let _ = shouldUsePreviewOnlyRendering ? perfLog("bubble preview-only \(perfSummary)") : ()
 
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .trailing, spacing: 4) {
                 if message.isStreaming && effectiveContent.isEmpty {
                     ThinkingIndicator()
                         .frame(maxWidth: .infinity, alignment: .leading)
+                } else if shouldUsePreviewOnlyRendering {
+                    Text(content)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .lineLimit(Self.previewOnlyLineLimit)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.disabled)
                 } else if shouldRenderAsPlainText {
                     let plainTextView = Text(content)
                         .frame(maxWidth: .infinity, alignment: .leading)
