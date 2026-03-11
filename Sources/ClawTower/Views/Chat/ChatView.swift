@@ -34,6 +34,18 @@ struct ChatView: View {
     @State private var currentModel: String
     @State private var lastDisplayMessageIDs: [String] = []
     @State private var rateLimitInfo: RateLimitInfo?
+
+    private static let chatPerfLoggingEnabled = true
+    private static let chatPerfPrefix = "[ChatPerf]"
+    private static let riskyMessageContentLengthThreshold = 1200
+    private static let logThrottleWindow: CFAbsoluteTime = 1.0
+
+    @State private var perfLogLastFiredAt: [String: CFAbsoluteTime] = [:]
+    @State private var perfUpdateInvocationCount = 0
+    @State private var perfMessagesCountChangeCount = 0
+    @State private var perfScrollTriggerChangeCount = 0
+    @State private var perfStreamingChangeCount = 0
+    @State private var perfScrollToCallCount = 0
     init(agent: Agent, client: GatewayClient, sessionKey: String, injectedContext: String? = nil, appState: AppState) {
         self.agent = agent
         self.client = client
@@ -76,7 +88,7 @@ struct ChatView: View {
         }
         .task {
             await loadInitialHistory()
-            updateDisplayMessages()
+            updateDisplayMessages(reason: "initial-load")
             isInitialLoadDone = true
             scrollTrigger += 1
             // 预填任务上下文到输入框
@@ -158,47 +170,61 @@ struct ChatView: View {
                 .padding(16)
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: messages.count) { _, _ in
+            .onChange(of: messages.count) { oldValue, newValue in
                 guard isInitialLoadDone else { return }
-                updateDisplayMessages()
+                perfMessagesCountChangeCount += 1
+                perfLog("messages.count onChange #\(perfMessagesCountChangeCount) old=\(oldValue) new=\(newValue) delta=\(newValue - oldValue) isStreaming=\(isStreaming ? 1 : 0)")
+                updateDisplayMessages(reason: "messages.count onChange")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     if let target = displayMessages.last {
-                        NSLog("🔥 [ScrollTo] target: %@", target.id)
+                        logScrollTo(reason: "messages.count", targetID: target.id)
                         proxy.scrollTo(target.id, anchor: .bottom)
                     }
                 }
             }
-            .onChange(of: scrollTrigger) { _, _ in
+            .onChange(of: scrollTrigger) { oldValue, newValue in
+                perfScrollTriggerChangeCount += 1
                 let scrollTriggerStart = CFAbsoluteTimeGetCurrent()
+                perfLogThrottled(
+                    key: "scrollTrigger-change",
+                    every: 0.2,
+                    "scrollTrigger onChange #\(perfScrollTriggerChangeCount) old=\(oldValue) new=\(newValue) delta=\(newValue - oldValue) isStreaming=\(isStreaming ? 1 : 0) display=\(displayMessages.count)"
+                )
                 if isStreaming {
-                    // During streaming, only update the streaming message's content in-place
                     if let streamingMsg = messages.first(where: { $0.isStreaming }),
                        let idx = displayMessages.firstIndex(where: { $0.id == streamingMsg.id }) {
                         displayMessages[idx].content = streamingMsg.content
                         displayContentCache[streamingMsg.id] = chatDisplayContent(streamingMsg)
+                        if let summary = perfRiskSummary(for: streamingMsg, displayContent: displayMessages[idx].content) {
+                            perfLogThrottled(key: "streaming-message-\(streamingMsg.id)", every: 0.5, "streaming in-place update \(summary)")
+                        }
+                    } else {
+                        perfLogThrottled(key: "scrollTrigger-streaming-miss", every: 0.5, "scrollTrigger streaming update missed display bubble")
                     }
                 } else {
-                    updateDisplayMessages()
+                    updateDisplayMessages(reason: "scrollTrigger non-streaming")
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     if let target = displayMessages.last {
-                        NSLog("🔥 [ScrollTo] target: %@", target.id)
+                        logScrollTo(reason: "scrollTrigger", targetID: target.id)
                         proxy.scrollTo(target.id, anchor: .bottom)
                     }
                 }
-                let scrollTriggerElapsed = CFAbsoluteTimeGetCurrent() - scrollTriggerStart
-                NSLog("🔥 [ScrollTrigger] took %.1fms, isStreaming: %d, displayCount: %d", scrollTriggerElapsed * 1000, isStreaming ? 1 : 0, displayMessages.count)
+                let scrollTriggerElapsed = (CFAbsoluteTimeGetCurrent() - scrollTriggerStart) * 1000
+                perfLogThrottled(key: "scrollTrigger-elapsed", every: 0.2, "scrollTrigger handled #\(perfScrollTriggerChangeCount) took=\(String(format: "%.1f", scrollTriggerElapsed))ms isStreaming=\(isStreaming ? 1 : 0) display=\(displayMessages.count)")
             }
-            .onChange(of: isStreaming) { _, newValue in
+            .onChange(of: isStreaming) { oldValue, newValue in
+                perfStreamingChangeCount += 1
+                perfLog("isStreaming onChange #\(perfStreamingChangeCount) old=\(oldValue ? 1 : 0) new=\(newValue ? 1 : 0) messages=\(messages.count) display=\(displayMessages.count)")
                 if newValue {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         if let target = messages.last {
+                            logScrollTo(reason: "isStreaming-start", targetID: target.id)
                             proxy.scrollTo(target.id, anchor: .bottom)
                         }
                     }
                 } else {
-                    // Streaming ended — do a full rebuild
-                    updateDisplayMessages()
+                    updateDisplayMessages(reason: "isStreaming false")
                 }
             }
         }
@@ -394,7 +420,7 @@ struct ChatView: View {
                 let finalIds = finalMessages.map(\.id)
                 guard currentIds != finalIds else { return }
                 messages = finalMessages
-                updateDisplayMessages()
+                updateDisplayMessages(reason: "poll-new-messages")
                 ChatMessageStore.shared.saveMessages(sessionKey: sessionKey, messages: finalMessages)
 
                 // 只检查本次新增的消息（不在之前 messages 中的）
@@ -433,8 +459,50 @@ struct ChatView: View {
         }
     }
 
-    private func updateDisplayMessages() {
+    private func perfLog(_ message: String) {
+        guard Self.chatPerfLoggingEnabled else { return }
+        NSLog("\(Self.chatPerfPrefix) %@", message)
+    }
+
+    private func perfLogThrottled(key: String, every interval: CFAbsoluteTime = ChatView.logThrottleWindow, _ message: @autoclosure () -> String) {
+        guard Self.chatPerfLoggingEnabled else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+        if let last = perfLogLastFiredAt[key], now - last < interval { return }
+        perfLogLastFiredAt[key] = now
+        perfLog(message())
+    }
+
+    private func perfRiskSummary(for message: ChatMessage, displayContent: String? = nil) -> String? {
+        let resolvedContent = displayContent ?? displayContentCache[message.id] ?? chatDisplayContent(message)
+        let isTruncated = !message.isStreaming && !message.isUser && message.isLong
+        let rendersAsPlainText = MessageBubble.shouldRenderAsPlainText(
+            resolvedContent,
+            isStreaming: message.isStreaming,
+            isTruncated: isTruncated
+        )
+        let isRisky = message.content.count >= Self.riskyMessageContentLengthThreshold || isTruncated || rendersAsPlainText
+        guard isRisky else { return nil }
+        let roleLabel = message.isAssistant ? "assistant" : (message.isUser ? "user" : message.role.rawValue)
+        return "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(rendersAsPlainText ? 1 : 0) truncated=\(isTruncated ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
+    }
+
+    private func logScrollTo(reason: String, targetID: String) {
+        perfScrollToCallCount += 1
+        perfLogThrottled(
+            key: "scrollTo-\(reason)-\(targetID)",
+            every: 0.35,
+            "scrollTo #\(perfScrollToCallCount) reason=\(reason) target=\(targetID) displayCount=\(displayMessages.count)"
+        )
+    }
+
+    private func updateDisplayMessages(reason: String = "unknown") {
+        perfUpdateInvocationCount += 1
         let updateStart = CFAbsoluteTimeGetCurrent()
+        perfLogThrottled(
+            key: "update-enter-\(reason)",
+            every: 0.25,
+            "updateDisplayMessages enter #\(perfUpdateInvocationCount) reason=\(reason) messages=\(messages.count) display=\(displayMessages.count) cache=\(displayContentCache.count) streaming=\(isStreaming ? 1 : 0)"
+        )
 
         var filtered: [ChatMessage] = []
         var newCache: [String: String] = [:]
@@ -477,7 +545,19 @@ struct ChatView: View {
             displayContentCache = newCache
         }
 
-        NSLog("🔥 [UpdateDisplay] took %.1fms, count: %d, changed: %d/%d", (CFAbsoluteTimeGetCurrent() - updateStart) * 1000, filtered.count, didMessageListChange ? 1 : 0, didCacheChange ? 1 : 0)
+        let riskySummaries = filtered.compactMap { message in
+            perfRiskSummary(for: message, displayContent: newCache[message.id])
+        }
+        if !riskySummaries.isEmpty {
+            perfLogThrottled(
+                key: "update-risky-\(reason)",
+                every: 1.5,
+                "updateDisplayMessages risky reason=\(reason) messages=[\(riskySummaries.joined(separator: "; "))]"
+            )
+        }
+
+        let elapsedMs = (CFAbsoluteTimeGetCurrent() - updateStart) * 1000
+        perfLog("updateDisplayMessages exit #\(perfUpdateInvocationCount) reason=\(reason) took=\(String(format: "%.1f", elapsedMs))ms filtered=\(filtered.count) listChanged=\(didMessageListChange ? 1 : 0) cacheChanged=\(didCacheChange ? 1 : 0)")
     }
 
     private func deduplicated(_ items: [ChatMessage]) -> [ChatMessage] {
@@ -486,7 +566,9 @@ struct ChatView: View {
     }
 
     private func chatDisplayContent(_ message: ChatMessage) -> String {
-        NSLog("🔥 [DisplayContent] called, length: %d, isUser: %d", message.content.count, message.isUser ? 1 : 0)
+        if let summary = perfRiskSummary(for: message, displayContent: message.content) {
+            perfLogThrottled(key: "display-content-\(message.id)", every: 2.0, "chatDisplayContent \(summary)")
+        }
         if message.isUser && !message.isSystemInjected { return message.content }
         let lines = message.content.components(separatedBy: "\n")
         let filtered = lines.filter { line in
@@ -586,7 +668,11 @@ struct ChatView: View {
                     if now.timeIntervalSince(lastFlush) > 0.05 || buffer.count > 20 {
                         if let idx = messages.firstIndex(where: { $0.id == streamingId }) {
                             messages[idx].content += buffer
-                            NSLog("🔥 [Stream] flush UI, content length: %d, tokens since last: %d", messages[idx].content.count, tokensSinceLastFlush)
+                            perfLogThrottled(
+                                key: "stream-flush-\(streamingId)",
+                                every: 0.25,
+                                "stream flush id=\(streamingId) contentLen=\(messages[idx].content.count) tokens=\(tokensSinceLastFlush)"
+                            )
                         }
                         buffer = ""
                         lastFlush = now
@@ -967,6 +1053,7 @@ private struct MessageBubble: View {
     @State private var pulseOpacity = 0.25
     @State private var detectedPaths: [String] = []
     @State private var didLoadDetectedPaths = false
+    @State private var didLogPerfAppear = false
 
     private var effectiveContent: String {
         displayContent ?? message.content
@@ -1023,7 +1110,7 @@ private struct MessageBubble: View {
         return paths
     }
 
-    nonisolated private static func shouldRenderAsPlainText(_ content: String, isStreaming: Bool, isTruncated: Bool) -> Bool {
+    nonisolated fileprivate static func shouldRenderAsPlainText(_ content: String, isStreaming: Bool, isTruncated: Bool) -> Bool {
         if isStreaming || isTruncated { return true }
         if content.count > 4000 { return true }
         if content.count > 1200 { return true }
@@ -1041,6 +1128,25 @@ private struct MessageBubble: View {
         if newlineCount >= 18 { return true }
 
         return false
+    }
+
+    private static let perfPrefix = "[ChatPerf]"
+    private static let riskyContentLengthThreshold = 1200
+
+    private var roleLabel: String {
+        message.isAssistant ? "assistant" : (message.isUser ? "user" : message.role.rawValue)
+    }
+
+    private var perfSummary: String {
+        "id=\(message.id) role=\(roleLabel) len=\(message.content.count) plain=\(shouldRenderAsPlainText ? 1 : 0) truncated=\(shouldTruncate ? 1 : 0) streaming=\(message.isStreaming ? 1 : 0)"
+    }
+
+    private var isPerfRisky: Bool {
+        message.content.count >= Self.riskyContentLengthThreshold || shouldTruncate || shouldRenderAsPlainText
+    }
+
+    private func perfLog(_ message: String) {
+        NSLog("\(Self.perfPrefix) %@", message)
     }
 
     var body: some View {
@@ -1114,6 +1220,10 @@ private struct MessageBubble: View {
             if isLeftAligned { Spacer(minLength: 60) }
         }
         .onAppear {
+            if !didLogPerfAppear, isPerfRisky {
+                didLogPerfAppear = true
+                perfLog("bubble appear \(perfSummary)")
+            }
             guard !didLoadDetectedPaths else { return }
             didLoadDetectedPaths = true
             guard message.isAssistant else { return }
@@ -1126,6 +1236,7 @@ private struct MessageBubble: View {
     private var bubbleBody: some View {
         let showTruncateButton = !isLastMessage && message.isLong
         let content = renderedContent
+        let _ = isPerfRisky ? perfLog("bubble render path \(perfSummary)") : ()
 
         ZStack(alignment: .topTrailing) {
             VStack(alignment: .trailing, spacing: 4) {
