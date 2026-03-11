@@ -52,6 +52,7 @@ struct OnboardingView: View {
     @State private var selectedFeedbackStyle: String = "委婉"
 
     @State private var selectedSchedule: String = "正常"
+    @State private var customOccupationOptions: [String] = []
     @State private var selectedOccupations: Set<String> = []
     @State private var customOccupation: String = ""
     @State private var selectedScenarios: Set<String> = []
@@ -62,6 +63,7 @@ struct OnboardingView: View {
     @State private var pendingPermission: PermissionCapability?
 
     private let totalSteps = 10
+    private let defaultOccupationOptions = ["独立开发者", "产品经理", "设计师", "学生", "创业者", "自由职业", "上班族", "内容创作者"]
 
     private let providerOptions: [ProviderOption] = [
         .init(provider: .anthropic, name: "Claude", subtitle: "Anthropic", description: "写作、分析和长期协作体验很强"),
@@ -100,9 +102,10 @@ struct OnboardingView: View {
                     default: EmptyView()
                     }
                 }
-                .frame(maxWidth: 720, maxHeight: .infinity, alignment: .top)
+                .frame(maxWidth: 760, maxHeight: .infinity, alignment: .center)
+                .padding(.top, 28)
 
-                Spacer(minLength: 16)
+                Spacer(minLength: 20)
 
                 navigationSection
             }
@@ -113,7 +116,7 @@ struct OnboardingView: View {
     }
 
     private var headerSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(stepEyebrow)
@@ -126,22 +129,15 @@ struct OnboardingView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 24)
-                Text("\(currentStep + 1)/\(totalSteps)")
+                Text("步骤 \(currentStep + 1) / \(totalSteps)")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.regularMaterial, in: Capsule())
             }
-
-            HStack(spacing: 8) {
-                ForEach(0..<totalSteps, id: \.self) { step in
-                    Capsule()
-                        .fill(step <= currentStep ? Color.accentColor : Color.secondary.opacity(0.16))
-                        .frame(height: 6)
-                }
-            }
         }
+        .frame(maxWidth: 760)
     }
 
     private var navigationSection: some View {
@@ -168,11 +164,11 @@ struct OnboardingView: View {
                 Color.clear
                     .frame(width: 56, height: 56)
             } else if currentStep < totalSteps - 1 {
-                ArrowNavigationButton(direction: .forward, disabled: !canAdvance) {
+                ArrowNavigationButton(direction: .forward, disabled: !canAdvance, highlight: canAdvance) {
                     currentStep += 1
                 }
             } else {
-                ArrowNavigationButton(direction: .forward, disabled: false) {
+                ArrowNavigationButton(direction: .forward, disabled: false, highlight: true) {
                     if appState.gatewayMode != .existingInstall {
                         let generator = OnboardingProfileGenerator(
                             agentName: agentName,
@@ -278,6 +274,18 @@ struct OnboardingView: View {
         activeAuthFlow = nil
     }
 
+    private func addCustomOccupation() {
+        let trimmed = customOccupation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        if !defaultOccupationOptions.contains(trimmed) && !customOccupationOptions.contains(trimmed) {
+            customOccupationOptions.append(trimmed)
+        }
+
+        selectedOccupations = [trimmed]
+        customOccupation = ""
+    }
+
     private func selectProvider(_ provider: AuthService.Provider) {
         guard !authService.isAuthenticated else { return }
         resetProviderSelection()
@@ -294,37 +302,37 @@ struct OnboardingView: View {
     // MARK: - Step 0: Welcome
 
     private var welcomeStep: some View {
-        onboardingCard(width: 720) {
-            VStack(spacing: 28) {
-                VStack(spacing: 18) {
-                    if let icon = NSApp.applicationIconImage {
-                        Image(nsImage: icon)
-                            .resizable()
-                            .interpolation(.high)
-                            .frame(width: 108, height: 108)
-                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                            .shadow(color: .black.opacity(0.12), radius: 18, y: 8)
-                    }
-
-                    VStack(spacing: 12) {
-                        Text("BuzyClaw 不是一个只会聊天的 AI。")
-                            .font(.system(size: 26, weight: .bold))
-                            .multilineTextAlignment(.center)
-                        Text("它更像一套运行在你自己设备上的个人工作台：能对话、记任务、做提醒、装技能、接管工具，也能在 macOS 和 iPhone 之间自然协同。数据留在你手里，能力按你的习惯长出来。")
-                            .font(.system(size: 16))
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .frame(maxWidth: 560)
-                    }
+        VStack(spacing: 34) {
+            VStack(spacing: 18) {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: 108, height: 108)
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .shadow(color: .black.opacity(0.10), radius: 20, y: 10)
                 }
 
-                HStack(spacing: 14) {
-                    featureCard(icon: "rectangle.on.rectangle.angled", title: "本地 Agent 工作台", description: "多 Agent 协作、任务分工和对话都在一处完成")
-                    featureCard(icon: "clock.badge.checkmark", title: "任务与提醒", description: "对话、待办、定时动作和技能库彼此打通")
-                    featureCard(icon: "lock.shield", title: "你自己掌控", description: "本地优先、能力可配、边界清楚，不被平台牵着走")
+                VStack(spacing: 12) {
+                    Text("BuzyClaw 不是一个只会聊天的 AI。")
+                        .font(.system(size: 30, weight: .bold))
+                        .multilineTextAlignment(.center)
+                    Text("它更像一套运行在你自己设备上的个人工作台：能对话、记任务、做提醒、装技能、接管工具，也能在 macOS 和 iPhone 之间自然协同。数据留在你手里，能力按你的习惯长出来。")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 580)
                 }
             }
+            .frame(maxWidth: .infinity)
+
+            HStack(spacing: 14) {
+                featureCard(icon: "rectangle.on.rectangle.angled", title: "本地 Agent 工作台", description: "多 Agent 协作、任务分工和对话都在一处完成")
+                featureCard(icon: "clock.badge.checkmark", title: "任务与提醒", description: "对话、待办、定时动作和技能库彼此打通")
+                featureCard(icon: "lock.shield", title: "你自己掌控", description: "本地优先、能力可配、边界清楚，不被平台牵着走")
+            }
         }
+        .frame(maxWidth: 760)
     }
 
     private func featureCard(icon: String, title: String, description: String) -> some View {
@@ -343,7 +351,8 @@ struct OnboardingView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
@@ -478,17 +487,19 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 26) {
                     sectionIntro(title: "把相处方式一次说清楚", description: "BuzyClaw 可以有态度，但别搞成戏精。把风格定好，后面省心很多。")
 
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 14) {
                         fieldLabel("说话风格")
-                        personalityCard(id: "professional", emoji: "🎯", title: "专业高效", desc: "简洁、明确、抓重点")
-                        personalityCard(id: "warm", emoji: "😊", title: "温暖贴心", desc: "更友好，也更照顾情绪")
-                        personalityCard(id: "witty", emoji: "😏", title: "幽默毒舌", desc: "有态度，不装孙子")
-                        personalityCard(id: "rational", emoji: "📚", title: "沉稳理性", desc: "更客观，逻辑先行")
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+                            personalityCard(id: "professional", emoji: "🎯", title: "专业高效", desc: "简洁、明确、抓重点")
+                            personalityCard(id: "warm", emoji: "😊", title: "温暖贴心", desc: "更友好，也更照顾情绪")
+                            personalityCard(id: "witty", emoji: "😏", title: "幽默毒舌", desc: "有态度，不装孙子")
+                            personalityCard(id: "rational", emoji: "📚", title: "沉稳理性", desc: "更客观，逻辑先行")
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 12) {
                         fieldLabel("主动程度")
-                        Picker("主动程度", selection: $selectedProactiveness) {
+                        Picker("", selection: $selectedProactiveness) {
                             Text("🐑 被动").tag("被动")
                             Text("🐕 适度主动").tag("适度")
                             Text("🦉 高度主动").tag("高度")
@@ -531,20 +542,24 @@ struct OnboardingView: View {
         return selectionRow(isSelected: isSelected) {
             selectedPersonality = id
         } content: {
-            HStack(spacing: 14) {
-                Text(emoji)
-                    .font(.system(size: 28))
-                    .frame(width: 44)
-                VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top) {
+                    Text(emoji)
+                        .font(.system(size: 28))
+                    Spacer(minLength: 12)
+                    selectionIndicator(isSelected: isSelected)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
                     Text(title)
                         .font(.headline)
                     Text(desc)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                selectionIndicator(isSelected: isSelected)
             }
+            .frame(maxWidth: .infinity, minHeight: 140, alignment: .topLeading)
         }
     }
 
@@ -553,49 +568,32 @@ struct OnboardingView: View {
     private var userInfoStep: some View {
         ScrollView {
             onboardingCard {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 24) {
                     sectionIntro(title: "让 BuzyClaw 更懂你", description: "不用填很多，只把影响协作体验的关键信息告诉它。")
 
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            fieldLabel("希望怎么称呼你")
-                            largeTextField("助手该怎么称呼你？", text: $userName)
-                        }
-                        .frame(maxWidth: .infinity)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            fieldLabel("作息习惯")
-                            Picker("作息习惯", selection: $selectedSchedule) {
-                                Text("🌅 早起型").tag("早起")
-                                Text("🌙 夜猫子").tag("夜猫")
-                                Text("⏰ 正常作息").tag("正常")
-                            }
-                            .pickerStyle(.segmented)
-                            .controlSize(.large)
-                            .frame(height: 50)
-                        }
-                        .frame(maxWidth: .infinity)
+                    VStack(alignment: .leading, spacing: 10) {
+                        fieldLabel("希望怎么称呼你")
+                        largeTextField("助手该怎么称呼你？", text: $userName)
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 12) {
                         fieldLabel("职业 / 身份")
                         tagGrid(
-                            options: ["独立开发者", "产品经理", "设计师", "学生", "创业者", "自由职业", "上班族", "内容创作者"],
+                            options: defaultOccupationOptions + customOccupationOptions,
                             selected: $selectedOccupations
                         )
 
                         HStack(spacing: 12) {
                             largeTextField("自定义职业", text: $customOccupation)
                             largeActionButton(title: "添加", icon: "plus", prominence: .secondary) {
-                                selectedOccupations.insert(customOccupation.trimmingCharacters(in: .whitespacesAndNewlines))
-                                customOccupation = ""
+                                addCustomOccupation()
                             }
                             .frame(width: 122)
                             .disabled(customOccupation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 12) {
                         fieldLabel("你最常用 BuzyClaw 做什么（至少选 1 个）")
                         tagGrid(
                             options: ["💻 编程开发", "📝 写作内容", "🔍 研究分析", "📅 日程管理", "📋 项目管理", "🧠 知识管理", "🎨 创意设计", "💬 日常助手"],
@@ -610,8 +608,8 @@ struct OnboardingView: View {
     }
 
     private func tagGrid(options: [String], selected: Binding<Set<String>>) -> some View {
-        let columns = [GridItem(.adaptive(minimum: 144), spacing: 8)]
-        return LazyVGrid(columns: columns, spacing: 8) {
+        let columns = [GridItem(.adaptive(minimum: 160), spacing: 12)]
+        return LazyVGrid(columns: columns, spacing: 12) {
             ForEach(options, id: \.self) { option in
                 let isSelected = selected.wrappedValue.contains(option)
                 Button {
@@ -632,9 +630,9 @@ struct OnboardingView: View {
                                 .foregroundStyle(Color.accentColor)
                         }
                     }
-                    .padding(.horizontal, 14)
+                    .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 40)
+                    .frame(height: 44)
                     .background(selectionBackground(isSelected))
                 }
                 .buttonStyle(.plain)
@@ -646,78 +644,88 @@ struct OnboardingView: View {
 
     private var providerStep: some View {
         ScrollView {
-            onboardingCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    sectionIntro(title: "选一个最顺手的 AI 大脑", description: "先选模型，再在同一页完成认证。逻辑不变，只是把信息整理得更不乱。")
+            onboardingCard(width: selectedProvider == nil ? 720 : 860) {
+                VStack(alignment: .leading, spacing: 18) {
+                    sectionIntro(title: "选一个最顺手的 AI 大脑", description: "先选模型，再在同一页完成认证。逻辑不变，只是把信息整理得更清楚。")
 
-                    VStack(spacing: 6) {
-                        ForEach(providerOptions) { option in
-                            providerRow(option)
-                        }
-                    }
-
-                    if let provider = selectedProvider {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("\(selectedProviderName) 认证")
-                                .font(.title3.bold())
-
-                            switch provider {
-                            case .anthropic:
-                                VStack(spacing: 12) {
-                                    authMethodGroup(title: "API Key") {
-                                        keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
-                                    }
-                                    authMethodGroup(title: "Setup Token") {
-                                        setupTokenSection
-                                    }
-                                }
-                            case .openai:
-                                VStack(spacing: 12) {
-                                    authMethodGroup(title: "API Key") {
-                                        keyInputSection(provider: .openai, flow: .openAIAPIKey)
-                                    }
-                                    authMethodGroup(title: "OAuth 登录") {
-                                        openAIOAuthSection
-                                    }
-                                }
-                            case .minimax:
-                                VStack(spacing: 12) {
-                                    authMethodGroup(title: "API Key") {
-                                        minimaxKeyInputSection
-                                    }
-                                    authMethodGroup(title: "OAuth 登录") {
-                                        minimaxOAuthSection
-                                    }
-                                }
-                            case .kimi:
-                                authMethodGroup(title: "API Key") {
-                                    kimiAuthSection
-                                }
-                            case .zai:
-                                authMethodGroup(title: "API Key") {
-                                    genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan, flow: .zaiAPIKey)
-                                }
-                            case .qwen:
-                                authMethodGroup(title: "API Key") {
-                                    genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo, flow: .qwenAPIKey)
-                                }
-                            case .google:
-                                authMethodGroup(title: "API Key") {
-                                    genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red, flow: .googleAPIKey)
-                                }
-                            case .xai:
-                                authMethodGroup(title: "API Key") {
-                                    genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray, flow: .xaiAPIKey)
-                                }
-                            case .openrouter:
-                                authMethodGroup(title: "API Key") {
-                                    genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint, flow: .openRouterAPIKey)
-                                }
+                    HStack(alignment: .top, spacing: 24) {
+                        VStack(spacing: 6) {
+                            ForEach(providerOptions) { option in
+                                providerRow(option)
                             }
                         }
-                        .padding(.top, 6)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .frame(width: selectedProvider == nil ? 620 : 290, alignment: .leading)
+
+                        if let provider = selectedProvider {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("\(selectedProviderName) 认证")
+                                    .font(.title3.bold())
+
+                                switch provider {
+                                case .anthropic:
+                                    VStack(spacing: 12) {
+                                        authMethodGroup(title: "API Key") {
+                                            keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
+                                        }
+                                        authMethodGroup(title: "Setup Token") {
+                                            setupTokenSection
+                                        }
+                                    }
+                                case .openai:
+                                    VStack(spacing: 12) {
+                                        authMethodGroup(title: "API Key") {
+                                            keyInputSection(provider: .openai, flow: .openAIAPIKey)
+                                        }
+                                        authMethodGroup(title: "OAuth 登录") {
+                                            openAIOAuthSection
+                                        }
+                                    }
+                                case .minimax:
+                                    VStack(spacing: 12) {
+                                        authMethodGroup(title: "API Key") {
+                                            minimaxKeyInputSection
+                                        }
+                                        authMethodGroup(title: "OAuth 登录") {
+                                            minimaxOAuthSection
+                                        }
+                                    }
+                                case .kimi:
+                                    authMethodGroup(title: "API Key") {
+                                        kimiAuthSection
+                                    }
+                                case .zai:
+                                    authMethodGroup(title: "API Key") {
+                                        genericApiKeyAuthSection(provider: .zai, providerName: "Z.AI", consoleName: "open.bigmodel.cn", consoleURL: "https://open.bigmodel.cn", tint: .cyan, flow: .zaiAPIKey)
+                                    }
+                                case .qwen:
+                                    authMethodGroup(title: "API Key") {
+                                        genericApiKeyAuthSection(provider: .qwen, providerName: "通义千问", consoleName: "dashscope.console.aliyun.com", consoleURL: "https://dashscope.console.aliyun.com", tint: .indigo, flow: .qwenAPIKey)
+                                    }
+                                case .google:
+                                    authMethodGroup(title: "API Key") {
+                                        genericApiKeyAuthSection(provider: .google, providerName: "Google Gemini", consoleName: "ai.google.dev", consoleURL: "https://ai.google.dev", tint: .red, flow: .googleAPIKey)
+                                    }
+                                case .xai:
+                                    authMethodGroup(title: "API Key") {
+                                        genericApiKeyAuthSection(provider: .xai, providerName: "xAI (Grok)", consoleName: "console.x.ai", consoleURL: "https://console.x.ai", tint: .gray, flow: .xaiAPIKey)
+                                    }
+                                case .openrouter:
+                                    authMethodGroup(title: "API Key") {
+                                        genericApiKeyAuthSection(provider: .openrouter, providerName: "OpenRouter", consoleName: "openrouter.ai/keys", consoleURL: "https://openrouter.ai/keys", tint: .mint, flow: .openRouterAPIKey)
+                                    }
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(22)
+                            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                    .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+                            )
+                            .transition(.opacity.combined(with: .move(edge: .trailing)))
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: selectedProvider == nil ? .center : .leading)
                 }
             }
             .padding(.vertical, 4)
@@ -780,12 +788,8 @@ struct OnboardingView: View {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(alignment: .top) {
-                        sectionIntro(title: "先装上常用技能", description: "缺依赖的能力会直接标出来。你也可以先跳过，之后再回设置里补。")
+                        sectionIntro(title: "先装上常用技能", description: "缺依赖的能力会直接标出来。先把常用的开上，后面再微调。")
                         Spacer(minLength: 16)
-                        largeActionButton(title: "先跳过", icon: "forward", prominence: .secondary) {
-                            currentStep += 1
-                        }
-                        .frame(width: 140)
                     }
 
                     if skillsService.isLoading {
@@ -813,7 +817,7 @@ struct OnboardingView: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 28)
                     } else {
-                        VStack(spacing: 12) {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
                             ForEach(skillsService.skills) { skill in
                                 onboardingSkillRow(skill)
                             }
@@ -871,10 +875,12 @@ struct OnboardingView: View {
             ))
             .labelsHidden()
             .toggleStyle(.switch)
-            .controlSize(.large)
+            .controlSize(.small)
+            .scaleEffect(0.92)
             .disabled(!skill.canBeEnabled)
         }
-        .padding(18)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -1346,7 +1352,7 @@ struct OnboardingView: View {
 
     private var permissionsStep: some View {
         onboardingCard {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 16) {
                 sectionIntro(title: "打开关键系统权限", description: "不开也能用，但如果你希望它真的替你干活，这几项最好开上。")
 
                 VStack(spacing: 12) {
@@ -1416,7 +1422,8 @@ struct OnboardingView: View {
                 .frame(width: 128)
             }
         }
-        .padding(18)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
         .background((granted ? Color.green.opacity(0.05) : Color(nsColor: .controlBackgroundColor)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -1458,7 +1465,7 @@ struct OnboardingView: View {
                         .frame(maxWidth: 460)
 
                     Text("📱 iPhone 端可在 App Store 搜索「虾忙」下载，用来远程连接和继续处理你的任务。")
-                        .font(.callout)
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.tertiary)
                         .multilineTextAlignment(.center)
                         .padding(.top, 4)
@@ -1491,7 +1498,7 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 0) {
             content()
         }
-        .padding(28)
+        .padding(30)
         .frame(maxWidth: width, alignment: .leading)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .overlay(
@@ -1680,23 +1687,26 @@ private struct ArrowNavigationButton: View {
 
     let direction: Direction
     let disabled: Bool
+    var highlight: Bool = false
     let action: () -> Void
 
     var body: some View {
+        let isForwardHighlight = direction == .forward && highlight && !disabled
+
         Button(action: action) {
             Image(systemName: direction.systemImage)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(disabled ? AnyShapeStyle(Color.secondary.opacity(0.55)) : AnyShapeStyle(Color.primary))
+                .foregroundStyle(disabled ? AnyShapeStyle(Color.secondary.opacity(0.55)) : AnyShapeStyle(isForwardHighlight ? Color.white : Color.primary))
                 .frame(width: 56, height: 56)
                 .background(
                     Circle()
-                        .fill(disabled ? Color.secondary.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+                        .fill(disabled ? Color.secondary.opacity(0.08) : (isForwardHighlight ? Color.accentColor : Color(nsColor: .controlBackgroundColor)))
                 )
                 .overlay(
                     Circle()
-                        .stroke(disabled ? Color.secondary.opacity(0.10) : Color.secondary.opacity(0.16), lineWidth: 1)
+                        .stroke(disabled ? Color.secondary.opacity(0.10) : (isForwardHighlight ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.16)), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(disabled ? 0 : 0.08), radius: 12, y: 6)
+                .shadow(color: .black.opacity(disabled ? 0 : (isForwardHighlight ? 0.16 : 0.08)), radius: isForwardHighlight ? 16 : 12, y: 6)
         }
         .buttonStyle(.plain)
         .disabled(disabled)
