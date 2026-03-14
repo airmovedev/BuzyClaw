@@ -50,6 +50,9 @@ final class AuthService {
     var availableModels: [AvailableModel] = []
     var selectedModelId: String?
 
+    /// Temporarily holds OpenAI OAuth credentials between OAuth completion and model selection.
+    private var pendingOAuthCredentials: (access: String, refresh: String, expiresIn: Int, accountId: String?)?
+
     private var currentTask: Task<Void, Never>?
 
     var isAuthenticated: Bool {
@@ -112,6 +115,14 @@ final class AuthService {
                 guard !Task.isCancelled else { return }
 
                 if valid {
+                    // Persist to openclaw.json + auth-profiles.json for providers that need it
+                    let resolvedHome = FileManager.default.homeDirectoryForCurrentUser.path
+                    switch provider {
+                    case .anthropic:
+                        try Self.persistAnthropicApiKeyProfile(apiKey: apiKey, homeDir: resolvedHome)
+                    default:
+                        break // Other providers have their own dedicated persist methods
+                    }
                     saveKey(provider: provider, apiKey: apiKey)
                     state = .verified
                 } else {
@@ -209,23 +220,60 @@ final class AuthService {
                 // 8. Extract accountId from JWT
                 let accountId = Self.extractAccountId(from: accessToken)
 
-                // 9. Persist credentials
-                try Self.persistOpenAIOAuthProfile(
-                    access: accessToken,
-                    refresh: refreshToken,
-                    expiresIn: expiresIn,
-                    accountId: accountId,
-                    homeDir: resolvedHome
-                )
+                // 9. Fetch available models so the user can pick one
+                let models = try await fetchOpenAIModels(token: accessToken)
+                guard !Task.isCancelled else { return }
 
-                saveKey(provider: .openai, apiKey: "oauth")
-                state = .verified
+                // Store credentials for later persistence after model selection
+                pendingOAuthCredentials = (accessToken, refreshToken, expiresIn, accountId)
+
+                if models.isEmpty {
+                    // No model list available — fall back to persisting without selection
+                    try Self.persistOpenAIOAuthProfile(
+                        access: accessToken,
+                        refresh: refreshToken,
+                        expiresIn: expiresIn,
+                        accountId: accountId,
+                        modelId: "gpt-5.4",
+                        homeDir: resolvedHome
+                    )
+                    saveKey(provider: .openai, apiKey: "oauth")
+                    state = .verified
+                } else {
+                    availableModels = models
+                    selectedModelId = models.first?.id
+                    state = .modelSelection
+                }
             } catch is CancellationError {
                 // Cancelled
             } catch {
                 guard !Task.isCancelled else { return }
                 state = .error("授权失败：\(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Called after user selects a model from the OpenAI model list.
+    func persistOpenAIOAuthWithModel(modelId: String, homeDir: String? = nil) {
+        guard let creds = pendingOAuthCredentials else {
+            state = .error("OAuth 凭据已失效，请重新授权")
+            return
+        }
+        let resolvedHome = homeDir ?? FileManager.default.homeDirectoryForCurrentUser.path
+        do {
+            try Self.persistOpenAIOAuthProfile(
+                access: creds.access,
+                refresh: creds.refresh,
+                expiresIn: creds.expiresIn,
+                accountId: creds.accountId,
+                modelId: modelId,
+                homeDir: resolvedHome
+            )
+            pendingOAuthCredentials = nil
+            saveKey(provider: .openai, apiKey: "oauth")
+            state = .verified
+        } catch {
+            state = .error("保存配置失败：\(error.localizedDescription)")
         }
     }
 
@@ -254,6 +302,7 @@ final class AuthService {
         state = .idle
         availableModels = []
         selectedModelId = nil
+        pendingOAuthCredentials = nil
     }
 
     // MARK: - Runtime Resolution
@@ -343,6 +392,113 @@ final class AuthService {
         ]
         auth["profiles"] = authProfiles
         configRoot["auth"] = auth
+
+        // agents.defaults.model — set primary to Anthropic if not already configured
+        var agents = configRoot["agents"] as? [String: Any] ?? [:]
+        var defaults = agents["defaults"] as? [String: Any] ?? [:]
+        var model = defaults["model"] as? [String: Any] ?? [:]
+        if model["primary"] == nil {
+            model["primary"] = "anthropic/claude-opus-4-6"
+        }
+        // Add to fallbacks if not present
+        var fallbacks = model["fallbacks"] as? [String] ?? []
+        let anthropicModel = "anthropic/claude-opus-4-6"
+        if !fallbacks.contains(anthropicModel) {
+            fallbacks.append(anthropicModel)
+        }
+        model["fallbacks"] = fallbacks
+        defaults["model"] = model
+
+        // agents.defaults.models — register the model with alias
+        var modelsMap = defaults["models"] as? [String: Any] ?? [:]
+        if modelsMap[anthropicModel] == nil {
+            modelsMap[anthropicModel] = ["alias": "opus"] as [String: Any]
+        }
+        defaults["models"] = modelsMap
+        agents["defaults"] = defaults
+        configRoot["agents"] = agents
+
+        let configData = try JSONSerialization.data(withJSONObject: configRoot, options: [.prettyPrinted, .sortedKeys])
+        try configData.write(to: openclawConfigURL, options: .atomic)
+    }
+
+    // MARK: - Persist Anthropic API Key Profile
+
+    nonisolated private static func persistAnthropicApiKeyProfile(apiKey: String, homeDir: String) throws {
+        let fm = FileManager.default
+        let homeURL = URL(fileURLWithPath: homeDir, isDirectory: true)
+
+        // Write auth-profiles.json
+        let agentDir = homeURL
+            .appendingPathComponent(".openclaw", isDirectory: true)
+            .appendingPathComponent("agents", isDirectory: true)
+            .appendingPathComponent("main", isDirectory: true)
+            .appendingPathComponent("agent", isDirectory: true)
+
+        try fm.createDirectory(at: agentDir, withIntermediateDirectories: true)
+
+        let authProfilesURL = agentDir.appendingPathComponent("auth-profiles.json")
+        var authRoot: [String: Any] = [:]
+        if let data = try? Data(contentsOf: authProfilesURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            authRoot = json
+        }
+        authRoot["version"] = 1
+        var profiles = authRoot["profiles"] as? [String: Any] ?? [:]
+        profiles["anthropic:default"] = [
+            "type": "api_key",
+            "provider": "anthropic",
+            "key": apiKey
+        ]
+        authRoot["profiles"] = profiles
+
+        let authData = try JSONSerialization.data(withJSONObject: authRoot, options: [.prettyPrinted, .sortedKeys])
+        try authData.write(to: authProfilesURL, options: .atomic)
+
+        // Write openclaw.json (deep merge)
+        let configDir = homeURL.appendingPathComponent(".openclaw", isDirectory: true)
+        try fm.createDirectory(at: configDir, withIntermediateDirectories: true)
+
+        let openclawConfigURL = configDir.appendingPathComponent("openclaw.json")
+        var configRoot: [String: Any] = [:]
+        if let data = try? Data(contentsOf: openclawConfigURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            configRoot = json
+        }
+
+        // auth.profiles
+        var auth = configRoot["auth"] as? [String: Any] ?? [:]
+        var authProfiles = auth["profiles"] as? [String: Any] ?? [:]
+        authProfiles["anthropic:default"] = [
+            "provider": "anthropic",
+            "mode": "api_key"
+        ]
+        auth["profiles"] = authProfiles
+        configRoot["auth"] = auth
+
+        // agents.defaults.model
+        let anthropicModel = "anthropic/claude-opus-4-6"
+        var agents = configRoot["agents"] as? [String: Any] ?? [:]
+        var defaults = agents["defaults"] as? [String: Any] ?? [:]
+        var model = defaults["model"] as? [String: Any] ?? [:]
+        if model["primary"] == nil {
+            model["primary"] = anthropicModel
+        }
+        var fallbacks = model["fallbacks"] as? [String] ?? []
+        if !fallbacks.contains(anthropicModel) {
+            fallbacks.append(anthropicModel)
+        }
+        model["fallbacks"] = fallbacks
+        defaults["model"] = model
+
+        // agents.defaults.models
+        var modelsMap = defaults["models"] as? [String: Any] ?? [:]
+        if modelsMap[anthropicModel] == nil {
+            modelsMap[anthropicModel] = ["alias": "opus"] as [String: Any]
+        }
+        defaults["models"] = modelsMap
+        agents["defaults"] = defaults
+        configRoot["agents"] = agents
 
         let configData = try JSONSerialization.data(withJSONObject: configRoot, options: [.prettyPrinted, .sortedKeys])
         try configData.write(to: openclawConfigURL, options: .atomic)
@@ -568,6 +724,7 @@ final class AuthService {
         refresh: String,
         expiresIn: Int,
         accountId: String?,
+        modelId: String,
         homeDir: String
     ) throws {
         let fm = FileManager.default
@@ -613,17 +770,29 @@ final class AuthService {
 
         let openclawConfigURL = configDir.appendingPathComponent("openclaw.json")
         var configRoot: [String: Any] = [:]
-        if let data = try? Data(contentsOf: openclawConfigURL),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            configRoot = json
+
+        // Read existing config with retry (file may be temporarily locked by Gateway hot-reload)
+        for attempt in 0..<3 {
+            if let data = try? Data(contentsOf: openclawConfigURL),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                configRoot = json
+                break
+            }
+            if attempt < 2 { Thread.sleep(forTimeInterval: 0.3) }
         }
 
         // agents.defaults.model.primary
+        let openaiModel = "openai-codex/\(modelId)"
         var agents = configRoot["agents"] as? [String: Any] ?? [:]
         var defaults = agents["defaults"] as? [String: Any] ?? [:]
         var model = defaults["model"] as? [String: Any] ?? [:]
-        model["primary"] = "openai-codex/o4-mini"
+        model["primary"] = openaiModel
         defaults["model"] = model
+        var modelsMap = defaults["models"] as? [String: Any] ?? [:]
+        if modelsMap[openaiModel] == nil {
+            modelsMap[openaiModel] = ["alias": "codex", "params": ["transport": "auto"]] as [String: Any]
+        }
+        defaults["models"] = modelsMap
         agents["defaults"] = defaults
         configRoot["agents"] = agents
 
@@ -636,6 +805,23 @@ final class AuthService {
         ]
         auth["profiles"] = authProfiles
         configRoot["auth"] = auth
+
+        // Safety: ensure gateway section is preserved (token, port, auth)
+        // If the config read failed, restore gateway from UserDefaults
+        if configRoot["gateway"] == nil {
+            var gateway: [String: Any] = [:]
+            if let savedToken = UserDefaults.standard.string(forKey: "gateway.authToken"), !savedToken.isEmpty {
+                gateway["auth"] = ["mode": "token", "token": savedToken] as [String: Any]
+            }
+            if let savedPort = UserDefaults.standard.object(forKey: "gateway.port") as? Int, savedPort > 0 {
+                gateway["port"] = savedPort
+            }
+            if !gateway.isEmpty {
+                gateway["mode"] = "local"
+                configRoot["gateway"] = gateway
+                NSLog("[AuthService] Restored gateway config from UserDefaults after config read failure")
+            }
+        }
 
         let configData = try JSONSerialization.data(withJSONObject: configRoot, options: [.prettyPrinted, .sortedKeys])
         try configData.write(to: openclawConfigURL, options: .atomic)
@@ -669,14 +855,34 @@ final class AuthService {
     // MARK: - OpenAI Verification
 
     nonisolated private func verifyOpenAIKey(apiKey: String) async throws -> Bool {
+        let models = try await fetchOpenAIModels(token: apiKey)
+        return !models.isEmpty
+    }
+
+    /// Fetch available models from OpenAI API and return chat-capable ones.
+    nonisolated private func fetchOpenAIModels(token: String) async throws -> [AvailableModel] {
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
 
-        let (_, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { return false }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return [] }
 
-        return http.statusCode == 200
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dataArray = json["data"] as? [[String: Any]] else { return [] }
+
+        // Filter to chat-capable models, exclude embeddings/tts/whisper/dall-e/moderation
+        let excludePrefixes = ["text-embedding", "tts-", "whisper-", "dall-e", "davinci", "babbage", "moderation"]
+        let models = dataArray.compactMap { item -> AvailableModel? in
+            guard let id = item["id"] as? String,
+                  let ownedBy = item["owned_by"] as? String else { return nil }
+            // Skip non-chat models
+            if excludePrefixes.contains(where: { id.hasPrefix($0) }) { return nil }
+            return AvailableModel(id: id, ownedBy: ownedBy)
+        }
+        .sorted { $0.id < $1.id }
+
+        return models
     }
 
     // MARK: - MiniMax Verification
@@ -947,7 +1153,7 @@ final class AuthService {
         models["providers"] = providers
         configRoot["models"] = models
 
-        // agents.defaults.model.primary
+        // agents.defaults.model — set primary only if not already configured
         var agents = configRoot["agents"] as? [String: Any] ?? [:]
         var defaults = agents["defaults"] as? [String: Any] ?? [:]
         var model = defaults["model"] as? [String: Any] ?? [:]

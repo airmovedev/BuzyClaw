@@ -184,6 +184,9 @@ final class CloudKitRelayService {
         logger.info("Stopping CloudKit Relay Service")
         pollingTask?.cancel()
         pollingTask = nil
+        activeDirectFetchOperation?.cancel()
+        activeDirectFetchOperation = nil
+        isDirectFetchInFlight = false
         syncEngine = nil
         relayClient = nil
         isRunning = false
@@ -220,6 +223,10 @@ final class CloudKitRelayService {
     @ObservationIgnored private var pollDiagCounter = 0
     @ObservationIgnored private var hasCompletedInitialFullFetch = false
     @ObservationIgnored private var directFetchChangeToken: CKServerChangeToken?
+    @ObservationIgnored private var activeDirectFetchOperation: CKFetchRecordZoneChangesOperation?
+    @ObservationIgnored private var isDirectFetchInFlight = false
+    @ObservationIgnored private var directFetchBackoffUntil = Date.distantPast
+    @ObservationIgnored private var directFetchFailureCount = 0
 
     /// Poll for pending messages using direct CKFetchRecordZoneChangesOperation with persisted change token.
     /// First poll (nil token) does a full fetch; subsequent polls are incremental.
@@ -229,8 +236,24 @@ final class CloudKitRelayService {
         pollDiagCounter += 1
         let shouldLogDiag = (pollDiagCounter % 10 == 1) // Log every ~30s
 
+        if isDirectFetchInFlight {
+            if shouldLogDiag {
+                NSLog("[CloudKitRelay] Poll diag #%d: skip direct fetch because previous fetch still running", pollDiagCounter)
+            }
+            return
+        }
+
+        if Date() < directFetchBackoffUntil {
+            if shouldLogDiag {
+                NSLog("[CloudKitRelay] Poll diag #%d: direct fetch in backoff, using fallback path", pollDiagCounter)
+            }
+            await pollPendingMessagesFallback(reason: "directFetchBackoff")
+            return
+        }
+
         do {
             let records = try await fetchZoneChangesDirectly()
+            directFetchFailureCount = 0
             lastSyncDate = Date()
 
             // Filter for pending toGateway messages
@@ -247,8 +270,8 @@ final class CloudKitRelayService {
                       pollDiagCounter, records.count, processedCount, CloudKitConstants.zoneID.zoneName)
             }
         } catch {
-            NSLog("[CloudKitRelay] ❌ fetchZoneChangesDirectly error: %@", error.localizedDescription)
-            logger.error("fetchZoneChangesDirectly error: \(error.localizedDescription)")
+            handleDirectFetchFailure(error)
+            await pollPendingMessagesFallback(reason: error.localizedDescription)
         }
     }
 
@@ -257,7 +280,8 @@ final class CloudKitRelayService {
     /// Fetch zone changes using CKFetchRecordZoneChangesOperation with persisted change token.
     /// Returns all MessageRecords found (caller filters by direction/status).
     private func fetchZoneChangesDirectly() async throws -> [(MessageRecord, CKRecord)] {
-        try await withCheckedThrowingContinuation { continuation in
+        isDirectFetchInFlight = true
+        return try await withCheckedThrowingContinuation { continuation in
             let zoneID = CloudKitConstants.zoneID
             let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration(
                 previousServerChangeToken: directFetchChangeToken
@@ -268,6 +292,7 @@ final class CloudKitRelayService {
                 configurationsByRecordZoneID: [zoneID: config]
             )
 
+            activeDirectFetchOperation = operation
             var results: [(MessageRecord, CKRecord)] = []
 
             operation.recordWasChangedBlock = { _, result in
@@ -283,22 +308,19 @@ final class CloudKitRelayService {
             }
 
             operation.recordZoneChangeTokensUpdatedBlock = { [weak self] _, token, _ in
-                if let token {
-                    Task { @MainActor in
-                        self?.directFetchChangeToken = token
-                        Self.saveDirectFetchToken(token)
-                    }
+                guard let token else { return }
+                Task { @MainActor in
+                    self?.directFetchChangeToken = token
+                    Self.saveDirectFetchToken(token)
                 }
             }
 
             operation.recordZoneFetchCompletionBlock = { [weak self] _, token, _, _, error in
-                if let error {
-                    if (error as? CKError)?.code == .changeTokenExpired {
-                        Task { @MainActor in
-                            self?.directFetchChangeToken = nil
-                            Self.saveDirectFetchToken(nil)
-                            NSLog("[CloudKitRelay] Change token expired, will do full fetch next poll")
-                        }
+                if let error, (error as? CKError)?.code == .changeTokenExpired {
+                    Task { @MainActor in
+                        self?.directFetchChangeToken = nil
+                        Self.saveDirectFetchToken(nil)
+                        NSLog("[CloudKitRelay] Change token expired, will do full fetch next poll")
                     }
                 } else if let token {
                     Task { @MainActor in
@@ -308,11 +330,15 @@ final class CloudKitRelayService {
                 }
             }
 
-            operation.fetchRecordZoneChangesCompletionBlock = { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: results)
+            operation.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
+                Task { @MainActor in
+                    self?.isDirectFetchInFlight = false
+                    self?.activeDirectFetchOperation = nil
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: results)
+                    }
                 }
             }
 
@@ -331,6 +357,91 @@ final class CloudKitRelayService {
             UserDefaults.standard.set(data, forKey: directFetchTokenKey)
         } catch {
             NSLog("[CloudKitRelay] Failed to save direct fetch token: %@", error.localizedDescription)
+        }
+    }
+
+    private func handleDirectFetchFailure(_ error: Error) {
+        let nsError = error as NSError
+        let ckError = error as? CKError
+        let message = error.localizedDescription
+        NSLog("[CloudKitRelay] ❌ fetchZoneChangesDirectly error: %@", message)
+        logger.error("fetchZoneChangesDirectly error: \(message)")
+
+        if ckError?.code == .changeTokenExpired {
+            directFetchChangeToken = nil
+            Self.saveDirectFetchToken(nil)
+        }
+
+        let looksLikeClientValidationFailure = message.localizedCaseInsensitiveContains("Client went away before operation")
+            || nsError.domain == CKError.errorDomain
+                && (ckError?.code == .serviceUnavailable || ckError?.code == .networkFailure || ckError?.code == .networkUnavailable)
+
+        if looksLikeClientValidationFailure {
+            directFetchChangeToken = nil
+            Self.saveDirectFetchToken(nil)
+            directFetchFailureCount += 1
+            let backoffSeconds = min(pow(2.0, Double(directFetchFailureCount)), 30.0)
+            directFetchBackoffUntil = Date().addingTimeInterval(backoffSeconds)
+            NSLog("[CloudKitRelay] Direct fetch entering backoff for %.0fs", backoffSeconds)
+        }
+    }
+
+    private func pollPendingMessagesFallback(reason: String) async {
+        guard isRunning else { return }
+
+        do {
+            if let syncEngine {
+                try? await syncEngine.fetchChanges()
+            }
+
+            let records = try await fetchPendingMessagesByQuery()
+            if !records.isEmpty {
+                NSLog("[CloudKitRelay] Fallback pending-message query returned %d records (reason=%@)", records.count, reason)
+            }
+            for (message, record) in records {
+                await processIncomingMessage(message, record: record)
+            }
+            lastSyncDate = Date()
+        } catch {
+            NSLog("[CloudKitRelay] ❌ fallback pending-message query failed: %@", error.localizedDescription)
+            logger.error("fallback pending-message query failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func fetchPendingMessagesByQuery() async throws -> [(MessageRecord, CKRecord)] {
+        try await withCheckedThrowingContinuation { continuation in
+            let predicate = NSPredicate(
+                format: "direction == %@ AND status == %@",
+                MessageDirection.toGateway.rawValue,
+                MessageStatus.pending.rawValue
+            )
+            let query = CKQuery(recordType: MessageRecord.recordType, predicate: predicate)
+            let operation = CKQueryOperation(query: query)
+            operation.zoneID = CloudKitConstants.zoneID
+
+            var results: [(MessageRecord, CKRecord)] = []
+
+            operation.recordMatchedBlock = { _, result in
+                switch result {
+                case .success(let record):
+                    guard let message = MessageRecord.from(record: record) else { return }
+                    results.append((message, record))
+                case .failure(let error):
+                    NSLog("[CloudKitRelay] fallback query recordMatched error: %@", error.localizedDescription)
+                }
+            }
+
+            operation.queryResultBlock = { result in
+                switch result {
+                case .success:
+                    continuation.resume(returning: results)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            operation.qualityOfService = .utility
+            self.database.add(operation)
         }
     }
 

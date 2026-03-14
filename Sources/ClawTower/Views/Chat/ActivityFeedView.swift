@@ -64,7 +64,8 @@ struct ActivityFeedView: View {
                 Color(.windowBackgroundColor)
             }
         }
-        .task {
+        .task(id: sessionKey) {
+            items = []
             await loadItems()
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))

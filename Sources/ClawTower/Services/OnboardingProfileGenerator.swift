@@ -15,13 +15,7 @@ struct OnboardingProfileGenerator {
 
     private var workspacePath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        switch gatewayMode {
-        case .existingInstall:
-            return home.appendingPathComponent(".openclaw/workspace").path
-        case .freshInstall:
-            return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ClawTower/.openclaw/workspace").path
-        }
+        return home.appendingPathComponent(".openclaw/workspace").path
     }
 
     private var workspaceURL: URL {
@@ -453,14 +447,7 @@ struct OnboardingProfileGenerator {
 
     private func createDefaultProject() throws {
         let fm = FileManager.default
-        let projectsPath: String
-        switch gatewayMode {
-        case .existingInstall:
-            projectsPath = fm.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/Projects").path
-        case .freshInstall:
-            projectsPath = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ClawTower/.openclaw/Projects").path
-        }
+        let projectsPath = fm.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/Projects").path
 
         let examplePath = (projectsPath as NSString).appendingPathComponent("我的第一个项目")
         try fm.createDirectory(atPath: examplePath, withIntermediateDirectories: true)
@@ -490,15 +477,8 @@ struct OnboardingProfileGenerator {
     // MARK: - Tools Profile
 
     private func writeToolsProfile() {
-        let configPath: String
-        switch gatewayMode {
-        case .existingInstall:
-            configPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".openclaw/openclaw.json").path
-        case .freshInstall:
-            configPath = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ClawTower/.openclaw/openclaw.json").path
-        }
+        let configPath = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".openclaw/openclaw.json").path
 
         var root: [String: Any] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
@@ -517,14 +497,7 @@ struct OnboardingProfileGenerator {
 
     private func createDefaultTask() throws {
         let fm = FileManager.default
-        let tasksPath: String
-        switch gatewayMode {
-        case .existingInstall:
-            tasksPath = fm.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/tasks.json").path
-        case .freshInstall:
-            tasksPath = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ClawTower/.openclaw/tasks.json").path
-        }
+        let tasksPath = fm.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw/tasks.json").path
 
         guard !fm.fileExists(atPath: tasksPath) else { return }
 

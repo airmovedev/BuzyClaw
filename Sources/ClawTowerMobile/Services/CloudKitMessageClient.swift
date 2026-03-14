@@ -55,6 +55,7 @@ final class CloudKitMessageClient {
     var unreadAgentIds: Set<String> = []
     var selectedAgentId = "main"
     var isWaitingForReply = false
+    private(set) var optimisticallyReceivedMessageIDs: Set<String> = []
 
     // MARK: - Debug properties
 
@@ -88,6 +89,22 @@ final class CloudKitMessageClient {
     private let pollingIntervalBackground: TimeInterval = 30
     /// Change token for direct zone-change fetches (independent of CKSyncEngine state)
     private var directFetchChangeToken: CKServerChangeToken?
+    private var activeDirectFetchOperation: CKFetchRecordZoneChangesOperation?
+    private var isDirectFetchInFlight = false
+
+    private func statusRank(_ status: MessageStatus) -> Int {
+        switch status {
+        case .pending: return 0
+        case .sent: return 1
+        case .received: return 2
+        case .delivered: return 3
+        case .read: return 4
+        }
+    }
+
+    private func mergedStatus(local: MessageStatus, remote: MessageStatus) -> MessageStatus {
+        statusRank(remote) >= statusRank(local) ? remote : local
+    }
     private static let directFetchTokenKey = "DirectFetchChangeToken"
 
     private static let hasLaunchedBeforeKey = "HasLaunchedBefore_v1"
@@ -170,6 +187,9 @@ final class CloudKitMessageClient {
     func stop() {
         pollingTask?.cancel()
         pollingTask = nil
+        activeDirectFetchOperation?.cancel()
+        activeDirectFetchOperation = nil
+        isDirectFetchInFlight = false
         syncEngine = nil
         debugSyncEngineActive = false
     }
@@ -225,6 +245,8 @@ final class CloudKitMessageClient {
             if let idx = messages.firstIndex(where: { $0.id == message.id }) {
                 messages[idx].status = .sent
             }
+            optimisticallyReceivedMessageIDs.insert(message.id)
+            isWaitingForReply = true
             NSLog("[iOS] ✅ CloudKit save SUCCESS for record %@ in zone %@", record.recordID.recordName, record.recordID.zoneID.zoneName)
             logger.info("✅ Message saved to CloudKit: \(message.id)")
             lastError = nil
@@ -284,6 +306,8 @@ final class CloudKitMessageClient {
             if let idx = messages.firstIndex(where: { $0.id == message.id }) {
                 messages[idx].status = .sent
             }
+            optimisticallyReceivedMessageIDs.insert(message.id)
+            isWaitingForReply = true
             NSLog("[iOS] ✅ CloudKit save SUCCESS for record %@ in zone %@", record.recordID.recordName, record.recordID.zoneID.zoneName)
             logger.info("✅ Image message saved to CloudKit: \(message.id)")
             lastError = nil
@@ -313,6 +337,8 @@ final class CloudKitMessageClient {
     }
 
     private func pollForResponses() async {
+        guard !isDirectFetchInFlight else { return }
+
         isSyncing = true
         defer { isSyncing = false }
 
@@ -347,10 +373,14 @@ final class CloudKitMessageClient {
                 // Also update status of sent messages in current session
                 if msg.direction == .toGateway && msg.sessionKey == sessionKey {
                     if let idx = messages.firstIndex(where: { $0.id == msg.id }) {
-                        messages[idx].status = msg.status
-                        didChange = true
-                        // macOS ACK'd received — it's now processing, show typing indicator
-                        if msg.status == .received {
+                        let oldStatus = messages[idx].status
+                        let merged = mergedStatus(local: oldStatus, remote: msg.status)
+                        if merged != oldStatus {
+                            messages[idx].status = merged
+                            didChange = true
+                        }
+                        // When macOS confirms receipt, start showing typing indicator
+                        if statusRank(oldStatus) < statusRank(.received), statusRank(merged) >= statusRank(.received) {
                             isWaitingForReply = true
                         }
                     }
@@ -381,7 +411,8 @@ final class CloudKitMessageClient {
     /// Fetch zone changes directly using CKFetchRecordZoneChangesOperation.
     /// Manages its own change token, independent of CKSyncEngine.
     private func fetchZoneChangesDirectly() async throws -> [MessageRecord] {
-        try await withCheckedThrowingContinuation { continuation in
+        isDirectFetchInFlight = true
+        return try await withCheckedThrowingContinuation { continuation in
             let zoneID = CloudKitConstants.zoneID
             let config = CKFetchRecordZoneChangesOperation.ZoneConfiguration(
                 previousServerChangeToken: directFetchChangeToken
@@ -392,6 +423,7 @@ final class CloudKitMessageClient {
                 configurationsByRecordZoneID: [zoneID: config]
             )
 
+            activeDirectFetchOperation = operation
             var fetchedMessages: [MessageRecord] = []
 
             // Use new API (recordWasChangedBlock) — the old recordChangedBlock
@@ -409,23 +441,19 @@ final class CloudKitMessageClient {
             }
 
             operation.recordZoneChangeTokensUpdatedBlock = { _, token, _ in
-                if let token {
-                    Task { @MainActor [weak self] in
-                        self?.directFetchChangeToken = token
-                        Self.saveDirectFetchToken(token)
-                    }
+                guard let token else { return }
+                Task { @MainActor [weak self] in
+                    self?.directFetchChangeToken = token
+                    Self.saveDirectFetchToken(token)
                 }
             }
 
             operation.recordZoneFetchCompletionBlock = { [weak self] _, token, _, _, error in
-                if let error {
-                    // If token is expired/invalid, reset and retry next poll
-                    if (error as? CKError)?.code == .changeTokenExpired {
-                        Task { @MainActor in
-                            self?.directFetchChangeToken = nil
-                            Self.saveDirectFetchToken(nil)
-                            self?.logger.info("Change token expired, will do full fetch next poll")
-                        }
+                if let error, (error as? CKError)?.code == .changeTokenExpired {
+                    Task { @MainActor in
+                        self?.directFetchChangeToken = nil
+                        Self.saveDirectFetchToken(nil)
+                        self?.logger.info("Change token expired, will do full fetch next poll")
                     }
                 } else if let token {
                     Task { @MainActor in
@@ -435,11 +463,15 @@ final class CloudKitMessageClient {
                 }
             }
 
-            operation.fetchRecordZoneChangesCompletionBlock = { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: fetchedMessages)
+            operation.fetchRecordZoneChangesCompletionBlock = { [weak self] error in
+                Task { @MainActor in
+                    self?.isDirectFetchInFlight = false
+                    self?.activeDirectFetchOperation = nil
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: fetchedMessages)
+                    }
                 }
             }
 
@@ -523,12 +555,15 @@ final class CloudKitMessageClient {
                 messages.append(msg)
                 didChange = true
             }
-            // Also update statuses for current session messages
+            // Also update statuses for current session messages without regressing local ACK state
             for msg in allMessages where msg.sessionKey == sessionKey {
-                if let idx = messages.firstIndex(where: { $0.id == msg.id }),
-                   messages[idx].status != msg.status {
-                    messages[idx].status = msg.status
-                    didChange = true
+                if let idx = messages.firstIndex(where: { $0.id == msg.id }) {
+                    let oldStatus = messages[idx].status
+                    let merged = mergedStatus(local: oldStatus, remote: msg.status)
+                    if merged != oldStatus {
+                        messages[idx].status = merged
+                        didChange = true
+                    }
                 }
             }
             if didChange {
@@ -549,6 +584,7 @@ final class CloudKitMessageClient {
             UserDefaults.standard.set(Array(notifiedMessageIDs), forKey: Self.notifiedIDsKey)
             isInitialSyncDone = true
         }
+        recalculateWaitingState()
         isSyncing = false
     }
 
@@ -566,6 +602,7 @@ final class CloudKitMessageClient {
 
     func appDidBecomeActive() {
         isInBackground = false
+        recalculateWaitingState()
         startPolling()
         Task {
             await pollForResponses()
@@ -590,6 +627,7 @@ final class CloudKitMessageClient {
         selectedAgentId = agentId
         customSessionKey = nil
         isWaitingForReply = false
+        optimisticallyReceivedMessageIDs.removeAll()
         unreadAgentIds.remove(agentId)
         UserDefaults.standard.set(agentId, forKey: Self.agentKey)
         loadLocalCache()
@@ -599,6 +637,7 @@ final class CloudKitMessageClient {
     func selectSession(_ sessionKey: String) {
         customSessionKey = sessionKey
         isWaitingForReply = false
+        optimisticallyReceivedMessageIDs.removeAll()
         let parts = sessionKey.split(separator: ":")
         if parts.count >= 2 {
             selectedAgentId = String(parts[1])
@@ -636,15 +675,21 @@ final class CloudKitMessageClient {
                             messages.sort { $0.timestamp < $1.timestamp }
                             didChange = true
                             isWaitingForReply = false
+                            clearOptimisticWaitingState(before: msg.timestamp, sessionKey: sessionKey)
                         }
                     }
                 }
 
                 if msg.direction == .toGateway && msg.sessionKey == sessionKey {
                     if let idx = messages.firstIndex(where: { $0.id == msg.id }) {
-                        messages[idx].status = msg.status
-                        didChange = true
-                        if msg.status == .received {
+                        let oldStatus = messages[idx].status
+                        let merged = mergedStatus(local: oldStatus, remote: msg.status)
+                        if merged != oldStatus {
+                            messages[idx].status = merged
+                            didChange = true
+                        }
+                        // When macOS confirms receipt, start showing typing indicator
+                        if statusRank(oldStatus) < statusRank(.received), statusRank(merged) >= statusRank(.received) {
                             isWaitingForReply = true
                         }
                     }
@@ -864,6 +909,43 @@ final class CloudKitMessageClient {
         }
     }
 
+
+    func frontendStatus(for message: MessageRecord) -> MessageStatus {
+        if message.direction == .toGateway,
+           message.status == .sent,
+           optimisticallyReceivedMessageIDs.contains(message.id) {
+            return .received
+        }
+        return message.status
+    }
+
+    private func clearOptimisticWaitingState(before replyTimestamp: Date, sessionKey: String) {
+        let acknowledgedIDs = messages
+            .filter { $0.sessionKey == sessionKey && $0.direction == .toGateway && $0.timestamp <= replyTimestamp }
+            .map(\.id)
+        optimisticallyReceivedMessageIDs.subtract(acknowledgedIDs)
+    }
+
+    /// Recalculate `isWaitingForReply` based on actual message state.
+    /// Sets true only if the last toGateway message has status `received`
+    /// and no fromGateway reply exists after it.
+    private func recalculateWaitingState() {
+        let sessionKey = currentSessionKey
+        let sessionMessages = messages.filter { $0.sessionKey == sessionKey }
+        guard let lastOutgoing = sessionMessages.last(where: { $0.direction == .toGateway }) else {
+            isWaitingForReply = false
+            return
+        }
+        guard statusRank(frontendStatus(for: lastOutgoing)) >= statusRank(.received) else {
+            isWaitingForReply = false
+            return
+        }
+        let hasReplyAfter = sessionMessages.contains { msg in
+            msg.direction == .fromGateway && msg.timestamp > lastOutgoing.timestamp
+        }
+        isWaitingForReply = !hasReplyAfter
+    }
+
     private func loadLocalCache() {
         let url = cacheFileURL()
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -881,6 +963,7 @@ final class CloudKitMessageClient {
             logger.error("Failed to load local cache: \(error.localizedDescription)")
             messages.removeAll()
         }
+        recalculateWaitingState()
     }
 }
 

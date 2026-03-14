@@ -1,5 +1,6 @@
 
 import SwiftUI
+import MarkdownUI
 
 struct MobileSecondBrainView: View {
     @State private var viewModel = MobileSecondBrainViewModel()
@@ -63,18 +64,10 @@ struct SecondBrainDocDetailView: View {
 
     var body: some View {
         ScrollView {
-            Text(mobileSecondBrainMarkdown(doc.contentPreview))
+            Markdown(doc.contentPreview)
                 .padding()
         }
         .navigationTitle(doc.displayName)
         .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-private func mobileSecondBrainMarkdown(_ string: String) -> AttributedString {
-    do {
-        return try AttributedString(markdown: string, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
-    } catch {
-        return AttributedString(string)
     }
 }

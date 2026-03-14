@@ -79,27 +79,13 @@ struct AgentDraft: Sendable {
     }
 
     private static func loadPreferredConfig() -> [String: Any]? {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let candidates = [
-            home.appendingPathComponent("Library/Application Support/ClawTower/.openclaw/openclaw.json"),
-            home.appendingPathComponent(".openclaw/openclaw.json")
-        ]
-
-        var best: [String: Any]?
-        var bestScore = -1
-
-        for url in candidates {
-            guard let data = try? Data(contentsOf: url),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            let score = modelCount(in: json)
-            if score > bestScore {
-                best = json
-                bestScore = score
-            }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let url = home.appendingPathComponent(".openclaw/openclaw.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
         }
-
-        return best
+        return json
     }
 
     private static func modelCount(in json: [String: Any]) -> Int {

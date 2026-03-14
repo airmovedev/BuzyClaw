@@ -1,17 +1,15 @@
 import SwiftUI
 
 struct CronJobsView: View {
-    let client: GatewayClient
+    let appState: AppState
+
+    private var client: GatewayClient { appState.gatewayClient }
 
     @State private var jobs: [CronJob] = []
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var agentNames: [String: String] = [:]
     @State private var showCreateSheet = false
-
-    init(client: GatewayClient) {
-        self.client = client
-    }
 
     private var groupedJobs: [(agentId: String, jobs: [CronJob])] {
         let dict = Dictionary(grouping: jobs, by: \.agentId)
@@ -26,9 +24,19 @@ struct CronJobsView: View {
             VStack(alignment: .leading, spacing: 0) {
 
                 if let errorMessage {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal)
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(errorMessage)
+                        Spacer()
+                        Button("重试") {
+                            Task { await loadJobs() }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
                 }
 
                 // Agent columns
@@ -68,7 +76,21 @@ struct CronJobsView: View {
         .navigationTitle("定时提醒")
         .task {
             loadAgentNames()
-            await loadJobs()
+            // Wait for Gateway to be running before calling API
+            for _ in 0..<30 {
+                if appState.gatewayManager.isRunning { break }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            guard appState.gatewayManager.isRunning else {
+                errorMessage = "Gateway 未运行，请在设置中检查 Gateway 状态"
+                return
+            }
+            // Retry a few times in case Gateway just started
+            for _ in 0..<3 {
+                await loadJobs()
+                if errorMessage == nil || Task.isCancelled { break }
+                try? await Task.sleep(for: .seconds(2))
+            }
         }
     }
 
@@ -78,6 +100,22 @@ struct CronJobsView: View {
         do {
             let data = try await client.cronListRaw()
             jobs = CronJobParser.parse(from: data)
+        } catch let urlError as URLError {
+            NSLog("[CronJobsView] URLError: \(urlError.code.rawValue), baseURL: \(client.baseURL)")
+            errorMessage = "无法连接 Gateway（\(urlError.code.rawValue)），请确认 Gateway 已启动"
+        } catch let gatewayError as GatewayClient.GatewayError {
+            NSLog("[CronJobsView] GatewayError: \(gatewayError.localizedDescription ?? "nil"), baseURL: \(client.baseURL)")
+            // Retry once after reloading auth token from config file
+            client.reloadAuthToken()
+            do {
+                let data = try await client.cronListRaw()
+                jobs = CronJobParser.parse(from: data)
+                errorMessage = nil
+                isLoading = false
+                return
+            } catch {
+                errorMessage = gatewayError.localizedDescription
+            }
         } catch {
             errorMessage = error.localizedDescription
         }

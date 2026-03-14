@@ -12,6 +12,7 @@ final class NavigationState {
 struct ClawTowerMobileApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var messageClient = CloudKitMessageClient()
+    @State private var snapshotStore = DashboardSnapshotStore()
     @State private var navigationState = NavigationState()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -47,11 +48,13 @@ struct ClawTowerMobileApp: App {
             }
             } // end VStack
             .environment(messageClient)
+            .environment(snapshotStore)
             .environment(navigationState)
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
                     messageClient.appDidBecomeActive()
+                    Task { await snapshotStore.refresh() }
                     UIApplication.shared.applicationIconBadgeNumber = 0
                 case .background:
                     messageClient.appDidEnterBackground()
@@ -65,6 +68,7 @@ struct ClawTowerMobileApp: App {
                 AppDelegate.navigationState = navigationState
                 AppDelegate.messageClient = messageClient
                 messageClient.start()
+                await snapshotStore.refresh()
             }
         }
     }

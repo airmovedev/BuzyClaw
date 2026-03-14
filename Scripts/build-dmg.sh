@@ -88,11 +88,34 @@ fi
 mkdir -p "${EXPORT_DIR}"
 
 if [ -n "${DEVELOPER_ID}" ]; then
-    # Export without re-signing (archive already has Team info; signing happens in Step 3.5)
-    echo "  Exporting app from archive..."
-    cp -R "${ARCHIVE_PATH}/Products/Applications/${APP_NAME}.app" "${EXPORT_DIR}/" 2>/dev/null \
-        || cp -R "${ARCHIVE_PATH}/Products/usr/local/bin/${APP_NAME}.app" "${EXPORT_DIR}/" 2>/dev/null \
-        || { echo "  ✗ Could not locate .app in archive"; exit 1; }
+    # Use xcodebuild -exportArchive to get a properly provisioned Developer ID app.
+    # Direct cp from archive carries the Development provisioning profile, which
+    # causes AMFI rejection for CloudKit restricted entitlements on other machines.
+    echo "  Exporting with Developer ID provisioning via xcodebuild -exportArchive..."
+
+    DEVID_EXPORT_OPTIONS="${BUILD_DIR}/ExportOptions-DeveloperID.plist"
+    cat > "${DEVID_EXPORT_OPTIONS}" <<'EXPORTPLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>method</key>
+    <string>developer-id</string>
+    <key>teamID</key>
+    <string>USYB32X4N8</string>
+    <key>signingStyle</key>
+    <string>automatic</string>
+    <key>iCloudContainerEnvironment</key>
+    <string>Production</string>
+</dict>
+</plist>
+EXPORTPLIST
+
+    xcodebuild -exportArchive \
+        -archivePath "${ARCHIVE_PATH}" \
+        -exportOptionsPlist "${DEVID_EXPORT_OPTIONS}" \
+        -exportPath "${EXPORT_DIR}" \
+        -allowProvisioningUpdates
 else
     # Unsigned: just copy .app from archive
     echo "  No Developer ID certificate found — exporting unsigned..."
@@ -115,8 +138,8 @@ echo "  ✓ Exported: ${APP_PATH} (${APP_SIZE})"
 if [ -n "${DEVELOPER_ID}" ]; then
     echo "▸ Step 3.5: Re-signing native binaries recursively (inside-out)..."
 
-    APP_SIGN_ARGS=(--force --sign "${DEVELOPER_ID}" --timestamp --options runtime)
-    echo "  Release signing strategy: do NOT carry over archive entitlements (avoid restricted CloudKit entitlements)"
+    APP_SIGN_ARGS=(--force --sign "${DEVELOPER_ID}" --entitlements "${PROJECT_DIR}/SupportFiles/ClawTower.entitlements" --timestamp --options runtime)
+    echo "  Release signing strategy: sign WITH entitlements (preserve CloudKit + iCloud container environment)"
 
     RESIGN_LIST="${BUILD_DIR}/resign-targets-${TIMESTAMP}.txt"
     : > "${RESIGN_LIST}"
@@ -157,24 +180,51 @@ if [ -n "${DEVELOPER_ID}" ]; then
     if codesign --verify --deep --strict "${APP_PATH}"; then
         echo "  ✓ Code signing verified"
 
-        # Post-sign entitlement check: ensure restricted CloudKit keys are absent for launch safety
+        # Post-sign entitlement check: ensure CloudKit keys ARE present
         if codesign -d --entitlements :- "${APP_PATH}" > "${SIGNED_ENTITLEMENTS_PLIST}" 2>/dev/null && grep -q "<plist" "${SIGNED_ENTITLEMENTS_PLIST}"; then
             echo "  Signed entitlements extracted"
-            BLOCKED_KEYS=(
+            REQUIRED_KEYS=(
                 "com.apple.developer.icloud-container-identifiers"
                 "com.apple.developer.icloud-services"
-                "com.apple.developer.team-identifier"
+                "com.apple.developer.icloud-container-environment"
             )
-            for key in "${BLOCKED_KEYS[@]}"; do
+            for key in "${REQUIRED_KEYS[@]}"; do
                 if grep -q "<key>${key}</key>" "${SIGNED_ENTITLEMENTS_PLIST}"; then
-                    echo "    ✗ Restricted entitlement still present: ${key}"
+                    echo "    ✓ Required entitlement present: ${key}"
+                else
+                    echo "    ✗ Required entitlement MISSING: ${key}"
                     SIGN_STATUS="failed"
                     exit 1
                 fi
             done
-            echo "  ✓ Restricted CloudKit entitlements are absent"
+            # Verify Production environment
+            if grep -A1 "com.apple.developer.icloud-container-environment" "${SIGNED_ENTITLEMENTS_PLIST}" | grep -q "Production"; then
+                echo "    ✓ iCloud container environment = Production"
+            else
+                echo "    ✗ iCloud container environment is NOT Production"
+                SIGN_STATUS="failed"
+                exit 1
+            fi
+            echo "  ✓ All required CloudKit entitlements verified"
         else
-            echo "  ✓ Signed app has no entitlements payload"
+            echo "  ✗ Signed app has no entitlements payload — CloudKit will not work!"
+            SIGN_STATUS="failed"
+            exit 1
+        fi
+
+        # Verify provisioning profile is Developer ID (not Development)
+        if [ -f "${APP_PATH}/Contents/embedded.provisionprofile" ]; then
+            if security cms -D -i "${APP_PATH}/Contents/embedded.provisionprofile" 2>/dev/null | grep -q "ProvisionsAllDevices"; then
+                echo "  ✓ Provisioning profile is Developer ID (provisions all devices)"
+            elif security cms -D -i "${APP_PATH}/Contents/embedded.provisionprofile" 2>/dev/null | grep -q "ProvisionedDevices"; then
+                echo "  ✗ ERROR: Provisioning profile is Development (device-specific), not Developer ID!"
+                echo "    This will cause AMFI rejection on other machines."
+                exit 1
+            else
+                echo "  ⚠ Could not determine provisioning profile type"
+            fi
+        else
+            echo "  ⚠ No embedded.provisionprofile found in app bundle"
         fi
 
         SIGN_STATUS="signed"
@@ -245,21 +295,37 @@ echo "  ✓ DMG created: ${DMG_PATH} (${DMG_SIZE})"
 # Step 5: Notarization
 # --------------------------------------------------
 if [ -n "${DEVELOPER_ID}" ] && [ "${SIGN_STATUS}" = "signed" ]; then
-    if [ -z "${APPLE_ID}" ] || [ -z "${APP_PASSWORD}" ]; then
-        echo "▸ Step 5: Skipping notarization (missing environment variables)"
-        echo "  Set APPLE_ID, APP_PASSWORD (and optionally TEAM_ID) to enable notarization"
-        NOTARIZE_STATUS="skipped (env vars missing)"
+    # Determine notarization auth method
+    NOTARY_AUTH=""
+    if xcrun notarytool history --keychain-profile "notarytool-profile" >/dev/null 2>&1; then
+        NOTARY_AUTH="keychain"
+    elif [ -n "${APPLE_ID}" ] && [ -n "${APP_PASSWORD}" ]; then
+        NOTARY_AUTH="password"
+    fi
+
+    if [ -z "${NOTARY_AUTH}" ]; then
+        echo "▸ Step 5: Skipping notarization (no keychain profile or env vars)"
+        echo "  Run 'xcrun notarytool store-credentials notarytool-profile' to set up"
+        echo "  Or set APPLE_ID + APP_PASSWORD environment variables"
+        NOTARIZE_STATUS="skipped (no auth)"
     else
         echo "▸ Step 5: Submitting for notarization..."
-        echo "  Apple ID: ${APPLE_ID}"
-        echo "  Team ID:  ${TEAM_ID}"
         NOTARY_OUT="${BUILD_DIR}/notary-${TIMESTAMP}.log"
         set +e
-        xcrun notarytool submit "${DMG_PATH}" \
-            --apple-id "${APPLE_ID}" \
-            --team-id "${TEAM_ID}" \
-            --password "${APP_PASSWORD}" \
-            --wait 2>&1 | tee "${NOTARY_OUT}"
+        if [ "${NOTARY_AUTH}" = "keychain" ]; then
+            echo "  Using keychain profile: notarytool-profile"
+            xcrun notarytool submit "${DMG_PATH}" \
+                --keychain-profile "notarytool-profile" \
+                --wait 2>&1 | tee "${NOTARY_OUT}"
+        else
+            echo "  Apple ID: ${APPLE_ID}"
+            echo "  Team ID:  ${TEAM_ID}"
+            xcrun notarytool submit "${DMG_PATH}" \
+                --apple-id "${APPLE_ID}" \
+                --team-id "${TEAM_ID}" \
+                --password "${APP_PASSWORD}" \
+                --wait 2>&1 | tee "${NOTARY_OUT}"
+        fi
         NOTARY_RC=${PIPESTATUS[0]}
         set -e
 
@@ -278,10 +344,16 @@ if [ -n "${DEVELOPER_ID}" ] && [ "${SIGN_STATUS}" = "signed" ]; then
             fi
         else
             echo "  ✗ Notarization failed"
-            [ -n "${SUBMISSION_ID}" ] && xcrun notarytool log "${SUBMISSION_ID}" \
-                --apple-id "${APPLE_ID}" \
-                --team-id "${TEAM_ID}" \
-                --password "${APP_PASSWORD}" || true
+            if [ -n "${SUBMISSION_ID}" ]; then
+                if [ "${NOTARY_AUTH}" = "keychain" ]; then
+                    xcrun notarytool log "${SUBMISSION_ID}" --keychain-profile "notarytool-profile" || true
+                else
+                    xcrun notarytool log "${SUBMISSION_ID}" \
+                        --apple-id "${APPLE_ID}" \
+                        --team-id "${TEAM_ID}" \
+                        --password "${APP_PASSWORD}" || true
+                fi
+            fi
             NOTARIZE_STATUS="failed"
         fi
     fi

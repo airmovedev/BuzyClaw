@@ -46,7 +46,22 @@ final class AppState {
         }
         self.gatewayManager = manager
         self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:0")!)
-        self.isOnboardingComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
+        let flaggedComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
+        if flaggedComplete {
+            // Validate that the data directory actually exists; if the user wiped
+            // ~/.openclaw the flag is stale.
+            let openclawDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw")
+            let configExists = FileManager.default.fileExists(atPath: openclawDir.appendingPathComponent("openclaw.json").path)
+            if configExists {
+                self.isOnboardingComplete = true
+            } else {
+                self.isOnboardingComplete = false
+                UserDefaults.standard.set(false, forKey: "onboardingComplete")
+                UserDefaults.standard.removeObject(forKey: "gateway.authToken")
+            }
+        } else {
+            self.isOnboardingComplete = false
+        }
     }
 
     func triggerSubagentRefresh() {
@@ -77,6 +92,8 @@ final class AppState {
         UserDefaults.standard.removeObject(forKey: "gatewayMode")
         UserDefaults.standard.removeObject(forKey: "selectedProvider")
         UserDefaults.standard.removeObject(forKey: "apiKey")
+        UserDefaults.standard.removeObject(forKey: "gateway.authToken")
+        UserDefaults.standard.removeObject(forKey: "gateway.port")
         // 停止当前 Gateway
         stopGateway()
     }
@@ -89,6 +106,7 @@ final class AppState {
         let url = URL(string: "http://localhost:\(gatewayManager.port)")!
         gatewayClient.updateBaseURL(url)
         gatewayClient.setAuthToken(gatewayManager.authToken)
+        NSLog("[AppState] Gateway client updated: baseURL=\(url), tokenPresent=\(gatewayManager.authToken.isEmpty ? "NO" : "YES"), mode=\(gatewayManager.mode)")
 
         // Wait for gateway to become healthy (up to 30s)
         for _ in 0..<30 {
@@ -176,17 +194,28 @@ final class AppState {
 
     func loadAgents() async {
         do {
+            let previousSelectedAgentID = selectedAgent?.id
             var fetched = try await gatewayClient.listAgents()
             for i in fetched.indices {
                 enrichAgentFromIdentity(&fetched[i])
             }
-            agents = fetched
-            if selectedAgent == nil, let first = agents.first {
-                selectedAgent = first
+            if agents.isEmpty && !fetched.isEmpty {
+                NSLog("[AppState] Agents loaded: \(fetched.map { $0.id }.joined(separator: ", "))")
             }
+            agents = fetched
+
+            if let previousSelectedAgentID,
+               let refreshedSelection = agents.first(where: { $0.id == previousSelectedAgentID }) {
+                selectedAgent = refreshedSelection
+            } else if let mainAgent = agents.first(where: { $0.id == "main" }) {
+                selectedAgent = mainAgent
+            } else {
+                selectedAgent = agents.first
+            }
+
             await refreshUnreadState()
         } catch {
-            // Gateway not reachable yet
+            NSLog("[AppState] loadAgents failed: \(error)")
         }
     }
 
@@ -230,6 +259,13 @@ final class AppState {
         unreadAgentIDs = unread
     }
 
+    func removeAgentLocally(_ agentID: String) {
+        agents.removeAll { $0.id == agentID }
+        if selectedAgent?.id == agentID {
+            selectedAgent = agents.first(where: { $0.id == "main" }) ?? agents.first
+        }
+    }
+
     func markAgentAsRead(_ agentID: String) {
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "lastRead.\(agentID)")
         unreadAgentIDs.remove(agentID)
@@ -237,15 +273,9 @@ final class AppState {
 
     // MARK: - Path Properties
 
-    /// The base .openclaw directory path, depending on gateway mode
+    /// The base .openclaw directory path — always ~/.openclaw regardless of gateway mode
     var openclawBasePath: URL {
-        switch gatewayMode {
-        case .existingInstall:
-            return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw")
-        case .freshInstall:
-            return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-                .appendingPathComponent("ClawTower/.openclaw")
-        }
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw")
     }
 
     var workspacePath: URL { openclawBasePath.appendingPathComponent("workspace") }

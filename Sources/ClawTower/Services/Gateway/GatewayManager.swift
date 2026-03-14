@@ -13,7 +13,7 @@ final class GatewayManager {
         case stopped
         case starting
         case running
-        case reconnecting
+        case reconnecting(since: Date)
         case disconnected
         case error(String)
     }
@@ -27,8 +27,6 @@ final class GatewayManager {
     private(set) var pid: Int32? = nil
 
     var isRunning: Bool { state == .running }
-    var isReconnecting: Bool { state == .reconnecting }
-    var isConnectionWarning: Bool { state == .reconnecting || state == .disconnected }
 
     var statusText: String {
         switch state {
@@ -36,9 +34,23 @@ final class GatewayManager {
         case .starting: return "启动中..."
         case .running: return "运行中 (端口 \(port))"
         case .reconnecting: return "重连中..."
-        case .disconnected: return "已断开"
+        case .disconnected: return "连接断开"
         case .error(let msg): return "错误: \(msg)"
         }
+    }
+
+    var isConnectionWarning: Bool {
+        switch state {
+        case .reconnecting, .disconnected:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var isReconnecting: Bool {
+        if case .reconnecting = state { return true }
+        return false
     }
 
     // MARK: - Private
@@ -51,6 +63,7 @@ final class GatewayManager {
     private var startingAt: Date?
     private var recentStderr: String = ""
     private var recentStdout: String = ""
+    private var connectionLostAt: Date?
 
     // MARK: - Start / Stop
 
@@ -91,6 +104,7 @@ final class GatewayManager {
                 port = existingPort
                 authToken = existingToken ?? ""
                 state = .running
+                connectionLostAt = nil
                 usingExternalGateway = true
                 print("[Gateway] Connected to existing gateway on port \(existingPort)")
                 startHealthCheck()
@@ -109,7 +123,15 @@ final class GatewayManager {
             terminateProcess()
         }
         usingExternalGateway = false
+        connectionLostAt = nil
         state = .stopped
+    }
+
+    /// Call before writing config changes to openclaw.json.
+    /// Resets crash counters so the expected restart from config file watching
+    /// doesn't exhaust the auto-restart limit.
+    func prepareForConfigChange() {
+        restartCount = 0
     }
 
     func restartGateway() async {
@@ -183,7 +205,7 @@ final class GatewayManager {
 
     /// Create or update HOME/.openclaw/openclaw.json for fresh install mode.
     /// This guarantees gateway.auth.token matches the runtime token used by the client.
-    private static func upsertGatewayConfig(at configFile: URL, authToken: String) {
+    private static func upsertGatewayConfig(at configFile: URL, authToken: String, port: Int) {
         var root: [String: Any] = [:]
 
         if let data = try? Data(contentsOf: configFile),
@@ -210,6 +232,7 @@ final class GatewayManager {
 
         var gateway = root["gateway"] as? [String: Any] ?? [:]
         gateway["mode"] = gateway["mode"] ?? "local"
+        gateway["port"] = port
 
         var auth = gateway["auth"] as? [String: Any] ?? [:]
         auth["mode"] = "token"
@@ -238,8 +261,33 @@ final class GatewayManager {
             tools["profile"] = "full"
         }
 
+        // IMPORTANT: Do NOT set tools.allow — it's a whitelist that blocks all other tools.
+        // If a previous build wrote tools.allow: ["cron"], remove it so all tools are available.
+        if let existingAllow = tools["allow"] as? [String], existingAllow == ["cron"] {
+            tools.removeValue(forKey: "allow")
+        }
+
         root["tools"] = tools
 
+        // Enable cron at the Gateway HTTP API level (cron is denied by default there)
+        var gatewayTools = gateway["tools"] as? [String: Any] ?? [:]
+        var gatewayAllow = gatewayTools["allow"] as? [String] ?? []
+        if !gatewayAllow.contains("cron") {
+            gatewayAllow.append("cron")
+        }
+        gatewayTools["allow"] = gatewayAllow
+        gateway["tools"] = gatewayTools
+        root["gateway"] = gateway
+
+        // Ensure agents.list includes at least the "main" agent so the sidebar always shows it
+        var agentsConfig = root["agents"] as? [String: Any] ?? [:]
+        var agentsList = agentsConfig["list"] as? [[String: Any]] ?? []
+        let hasMain = agentsList.contains { ($0["id"] as? String)?.lowercased() == "main" }
+        if !hasMain {
+            agentsList.insert(["id": "main"] as [String: Any], at: 0)
+        }
+        agentsConfig["list"] = agentsList
+        root["agents"] = agentsConfig
 
         if let data = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: configFile, options: .atomic)
@@ -304,22 +352,26 @@ final class GatewayManager {
         state = .starting
         startingAt = Date()
 
-        // Reuse persisted port+token if available, otherwise allocate new ones
-        let savedPort = UserDefaults.standard.integer(forKey: "gateway.port")
-        let savedToken = UserDefaults.standard.string(forKey: "gateway.authToken")
-
-        if savedPort > 0, let token = savedToken, !token.isEmpty {
-            port = savedPort
-            authToken = token
+        // Reuse saved port if available and free; otherwise allocate a new one
+        let resolvedPort: Int
+        if let savedPort = UserDefaults.standard.object(forKey: "gateway.port") as? Int,
+           savedPort > 0, Self.isPortAvailable(savedPort) {
+            resolvedPort = savedPort
         } else {
-            let freePort = Self.findFreePort()
-            guard freePort > 0 else {
-                state = .error("无法分配可用端口")
-                return
-            }
-            port = freePort
+            resolvedPort = Self.findFreePort()
+        }
+        guard resolvedPort > 0 else {
+            state = .error("无法分配可用端口")
+            return
+        }
+        port = resolvedPort
+        UserDefaults.standard.set(resolvedPort, forKey: "gateway.port")
+
+        // Reuse persisted token if available (stable across launches), otherwise generate new
+        if let savedToken = UserDefaults.standard.string(forKey: "gateway.authToken"), !savedToken.isEmpty {
+            authToken = savedToken
+        } else {
             authToken = UUID().uuidString
-            UserDefaults.standard.set(port, forKey: "gateway.port")
             UserDefaults.standard.set(authToken, forKey: "gateway.authToken")
         }
 
@@ -360,22 +412,13 @@ final class GatewayManager {
             ]
         }
 
-        let homeDir: String
-        if mode == .freshInstall {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            let clawTowerDir = appSupport.appendingPathComponent("ClawTower")
-            try? FileManager.default.createDirectory(at: clawTowerDir, withIntermediateDirectories: true)
-            homeDir = clawTowerDir.path
-
-            // Write minimal openclaw.json so Gateway registers API routes
-            let configDir = clawTowerDir.appendingPathComponent(".openclaw")
-            try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
-            let configFile = configDir.appendingPathComponent("openclaw.json")
-            Self.upsertGatewayConfig(at: configFile, authToken: authToken)
-            print("[Gateway] Ensured gateway config at \(configFile.path)")
-        } else {
-            homeDir = NSHomeDirectory()
-        }
+        // Both freshInstall and existingInstall use ~/.openclaw as data directory
+        let homeDir = NSHomeDirectory()
+        let configDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".openclaw")
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+        let configFile = configDir.appendingPathComponent("openclaw.json")
+        Self.upsertGatewayConfig(at: configFile, authToken: authToken, port: port)
+        print("[Gateway] Ensured gateway config at \(configFile.path)")
 
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
@@ -459,6 +502,7 @@ final class GatewayManager {
         let ready = await waitForGatewayReady(port: port, token: authToken, timeout: 30)
         if ready {
             state = .running
+            connectionLostAt = nil
             restartCount = 0
         }
 
@@ -541,7 +585,7 @@ final class GatewayManager {
 
             while !Task.isCancelled {
                 await self.checkHealth()
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: .seconds(1))
             }
         }
     }
@@ -549,27 +593,68 @@ final class GatewayManager {
     private func checkHealth() async {
         let url = URL(string: "http://localhost:\(port)/health")!
         var request = URLRequest(url: url)
-        request.timeoutInterval = 5
+        request.timeoutInterval = 1.5
         request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             if let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
+                connectionLostAt = nil
                 if state != .running {
                     state = .running
                     restartCount = 0
                 }
+                return
             }
+
+            handleUnhealthyConnection()
         } catch {
             if state == .starting {
                 if let startedAt = startingAt, Date().timeIntervalSince(startedAt) > 15 {
                     state = .error("Gateway 启动超时（15秒无响应）\nPort: \(port)\nNode: \(process?.executableURL?.path ?? "nil")\nPID: \(pid?.description ?? "nil")")
                 }
+                return
             }
+
+            handleUnhealthyConnection()
+        }
+    }
+
+    private func handleUnhealthyConnection(now: Date = Date()) {
+        if connectionLostAt == nil {
+            connectionLostAt = now
+        }
+
+        let lostAt = connectionLostAt ?? now
+        let outageDuration = now.timeIntervalSince(lostAt)
+
+        if outageDuration >= 10 {
+            state = .disconnected
+        } else {
+            state = .reconnecting(since: lostAt)
         }
     }
 
     // MARK: - Port Allocation
+
+    /// Check whether a specific port is available for binding on loopback.
+    private static func isPortAvailable(_ port: Int) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.bind(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
+    }
 
     private static func findFreePort() -> Int {
         let sock = socket(AF_INET, SOCK_STREAM, 0)

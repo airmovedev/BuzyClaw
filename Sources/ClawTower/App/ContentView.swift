@@ -76,8 +76,8 @@ struct ContentView: View {
         .sheet(isPresented: $showAgentDetail) {
             if let agent = currentAgent {
                 AgentDetailView(agent: agent, client: appState.gatewayClient, onDelete: {
+                    appState.removeAgentLocally(agent.id)
                     Task { await appState.loadAgents() }
-                    appState.selectedAgent = appState.agents.first(where: { $0.id == "main" }) ?? appState.agents.first
                 })
             }
         }
@@ -155,13 +155,13 @@ struct ContentView: View {
         case .projects:
             ProjectsView()
         case .cronJobs:
-            CronJobsView(client: appState.gatewayClient)
+            CronJobsView(appState: appState)
         case .skills:
             SkillsView()
         case .settings:
             SettingsView(appState: appState)
         case .chat(let agentId):
-            if let agent = appState.agents.first(where: { $0.id == agentId }) ?? appState.selectedAgent {
+            if let agent = appState.agents.first(where: { $0.id == agentId }) {
                 let sk = "agent:\(agent.id):\(agent.id)"
                 ChatView(
                     agent: agent,
@@ -180,7 +180,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         case .chatSession(let agentId, let sessionKey, _):
-            if let agent = appState.agents.first(where: { $0.id == agentId }) ?? appState.selectedAgent {
+            if let agent = appState.agents.first(where: { $0.id == agentId }) {
                 ChatView(
                     agent: agent,
                     client: appState.gatewayClient,

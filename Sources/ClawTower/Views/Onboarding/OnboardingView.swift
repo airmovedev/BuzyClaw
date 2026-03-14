@@ -29,6 +29,7 @@ struct OnboardingView: View {
     }
 
     @State private var currentStep = 0
+    @State private var stepTransitionDirection: Edge = .trailing
     @State private var agentName = "Assistant"
     @State private var agentEmoji = "🤖"
     @State private var userName = ""
@@ -82,37 +83,30 @@ struct OnboardingView: View {
             Color(nsColor: .windowBackgroundColor)
                 .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                headerSection
-
-                Spacer(minLength: 16)
-
-                Group {
-                    switch currentStep {
-                    case 0: welcomeStep
-                    case 1: detectionStep
-                    case 2: nameStep
-                    case 3: personalityStep
-                    case 4: userInfoStep
-                    case 5: providerStep
-                    case 6: skillsStep
-                    case 7: toolsProfileStep
-                    case 8: permissionsStep
-                    case 9: readyStep
-                    default: EmptyView()
-                    }
+            HStack(spacing: sideNavigationGap) {
+                sideNavigationRail {
+                    navigationBackSlot
                 }
-                .frame(maxWidth: 760, maxHeight: .infinity, alignment: .center)
-                .padding(.top, 28)
 
-                Spacer(minLength: 20)
+                VStack(spacing: 0) {
+                    headerSection
+                        .padding(.bottom, 24)
 
-                navigationSection
+                    contentSection
+                        .layoutPriority(1)
+                }
+                .frame(maxWidth: onboardingContentWidth, maxHeight: .infinity, alignment: .top)
+
+                sideNavigationRail {
+                    navigationForwardSlot
+                }
             }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 24)
+            .frame(maxWidth: navigationLayoutWidth, maxHeight: .infinity, alignment: .center)
+            .padding(.horizontal, contentHorizontalPadding)
+            .padding(.top, 24)
+            .padding(.bottom, 28)
         }
-        .frame(minWidth: 760, minHeight: 640)
+        .frame(minWidth: 860, minHeight: 640)
     }
 
     private var headerSection: some View {
@@ -140,32 +134,56 @@ struct OnboardingView: View {
         .frame(maxWidth: 760)
     }
 
-    private var navigationSection: some View {
-        HStack {
-            if currentStep > 0 && currentStep != 1 {
-                ArrowNavigationButton(direction: .back, disabled: false) {
-                    if currentStep == 9 && appState.gatewayMode == .existingInstall {
-                        currentStep = 1
-                        return
-                    }
-                    if currentStep == 5 {
-                        resetProviderSelection()
-                    }
-                    currentStep -= 1
+    @ViewBuilder
+    private var contentSection: some View {
+        ZStack {
+            currentStepView
+                .id(currentStep)
+                .transition(stepTransition)
+        }
+        .frame(maxWidth: onboardingContentWidth, maxHeight: .infinity, alignment: .top)
+        .animation(stepTransitionAnimation, value: currentStep)
+    }
+
+    @ViewBuilder
+    private var currentStepView: some View {
+        switch currentStep {
+        case 0: welcomeStep
+        case 1: detectionStep
+        case 2: nameStep
+        case 3: personalityStep
+        case 4: userInfoStep
+        case 5: providerStep
+        case 6: skillsStep
+        case 7: toolsProfileStep
+        case 8: permissionsStep
+        case 9: readyStep
+        default: EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private var navigationBackSlot: some View {
+        if showBackNavigation {
+            ArrowNavigationButton(direction: .back, disabled: false) {
+                if currentStep == 9 && appState.gatewayMode == .existingInstall {
+                    navigateToStep(1, direction: .leading)
+                    return
                 }
-            } else {
-                Color.clear
-                    .frame(width: 56, height: 56)
+                if currentStep == 5 {
+                    resetProviderSelection()
+                }
+                moveStep(by: -1)
             }
+        }
+    }
 
-            Spacer()
-
-            if currentStep == 1 {
-                Color.clear
-                    .frame(width: 56, height: 56)
-            } else if currentStep < totalSteps - 1 {
+    @ViewBuilder
+    private var navigationForwardSlot: some View {
+        if showForwardNavigation {
+            if currentStep < totalSteps - 1 {
                 ArrowNavigationButton(direction: .forward, disabled: !canAdvance, highlight: canAdvance) {
-                    currentStep += 1
+                    moveStep(by: 1)
                 }
             } else {
                 ArrowNavigationButton(direction: .forward, disabled: false, highlight: true) {
@@ -189,9 +207,6 @@ struct OnboardingView: View {
                 }
             }
         }
-        .frame(maxWidth: 760)
-        .padding(.vertical, 4)
-        .background(Color.clear)
     }
 
     private var stepEyebrow: String {
@@ -228,16 +243,16 @@ struct OnboardingView: View {
 
     private var stepSubtitle: String {
         switch currentStep {
-        case 0: return "本地优先、可自定义、有记忆，也能和 iPhone 协同。整个流程只帮你把体验打磨顺，不乱改你的核心设置。"
-        case 1: return "如果已经装过 OpenClaw，我们会尽量复用现有配置，少折腾一次。"
-        case 2: return "名字和形象会影响之后的默认人设，但不影响能力，后面随时都能再改。"
-        case 3: return "统一好表达方式、主动程度和提醒风格，后面日常协作会顺手很多。"
-        case 4: return "让 虾忙 了解你的称呼、作息和使用重点，后面给出的建议会更贴身。"
-        case 5: return "先把大脑接上。你可以选熟悉的模型服务，流程不变，只把呈现方式做得更清楚。"
-        case 6: return "技能就是可插拔能力。先装常用的，之后也能在设置里继续增减。"
-        case 7: return "工具越多，行动能力越强；范围越小，边界越保守。按你的习惯来。"
-        case 8: return "这些权限都能稍后再改。先开常用项，虾忙 才能更像一台真正会干活的工作台。"
-        case 9: return appState.gatewayMode == .existingInstall ? "现有环境已识别完成，马上就能继续工作。" : "配置不会把你绑死，后面都能继续微调。先开始用，才是正经事。"
+        case 0: return "本地优先、可自定义、有记忆，也能和 iPhone 协同"
+        case 1: return "如果已经装过 OpenClaw，可复用现有配置，少折腾一次"
+        case 2: return "名字和形象会影响之后的默认虾设，但不影响能力，后面随时都能再改"
+        case 3: return "统一好表达方式、主动程度和提醒风格，后面日常协作会顺手很多"
+        case 4: return "让「虾忙」了解你的称呼、作息和使用重点，后面给出的建议会更贴身"
+        case 5: return "先把大脑接上。你可以选熟悉的模型服务"
+        case 6: return "技能就是可插拔能力。先装常用的，之后也能在设置里继续增减"
+        case 7: return "工具越多，行动能力越强；范围越小，边界越保守。按你的习惯来"
+        case 8: return "这些权限都能稍后再改。先开常用项，「虾忙」才能更像一台真正会干活的Agent"
+        case 9: return appState.gatewayMode == .existingInstall ? "现有环境已识别完成，马上就能开始工作" : "配置之后都能继续调整。先开始用，才是正经事。"
         default: return ""
         }
     }
@@ -256,13 +271,63 @@ struct OnboardingView: View {
         providerOptions.first(where: { $0.provider == selectedProvider })?.name ?? ""
     }
 
-    private var currentAuthState: AuthService.AuthState? {
-        guard let activeAuthFlow else { return nil }
-        return stateForActiveFlow(activeAuthFlow)
+    private let contentHorizontalPadding: CGFloat = 48
+    private let sideNavigationGap: CGFloat = 24
+    private let sideNavigationRailWidth: CGFloat = 72
+    private let authControlHeight: CGFloat = 44
+    private let formCornerRadius: CGFloat = 12
+    private let authControlCornerRadius: CGFloat = 14
+    private let authActionMinWidth: CGFloat = 92
+    private let authPrimaryButtonMinWidth: CGFloat = 178
+    private let authSecondaryButtonMinWidth: CGFloat = 110
+
+    private var onboardingContentWidth: CGFloat {
+        currentStep == 5 && selectedProvider != nil ? 900 : 760
     }
 
-    private var authMethodColumns: [GridItem] {
-        [GridItem(.flexible(minimum: 220), spacing: 16), GridItem(.flexible(minimum: 220), spacing: 16)]
+    private var navigationLayoutWidth: CGFloat {
+        onboardingContentWidth + (sideNavigationRailWidth * 2) + (sideNavigationGap * 2)
+    }
+
+    private var showBackNavigation: Bool {
+        currentStep > 0 && currentStep != 1
+    }
+
+    private var showForwardNavigation: Bool {
+        currentStep != 1
+    }
+
+    private func sideNavigationRail<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack {
+            Spacer(minLength: 0)
+            content()
+            Spacer(minLength: 0)
+        }
+        .frame(width: sideNavigationRailWidth)
+        .frame(maxHeight: .infinity, alignment: .center)
+    }
+
+    private var stepTransition: AnyTransition {
+        .asymmetric(
+            insertion: .opacity.combined(with: .move(edge: stepTransitionDirection)).combined(with: .scale(scale: 0.985, anchor: .center)),
+            removal: .opacity.combined(with: .move(edge: stepTransitionDirection == .trailing ? .leading : .trailing))
+        )
+    }
+
+    private var stepTransitionAnimation: Animation {
+        .spring(response: 0.34, dampingFraction: 0.9, blendDuration: 0.08)
+    }
+
+    private func navigateToStep(_ step: Int, direction: Edge) {
+        withAnimation(stepTransitionAnimation) {
+            stepTransitionDirection = direction
+            currentStep = step
+        }
+    }
+
+    private func moveStep(by delta: Int) {
+        guard delta != 0 else { return }
+        navigateToStep(currentStep + delta, direction: delta > 0 ? .trailing : .leading)
     }
 
     private func stateForActiveFlow(_ flow: AuthFlow) -> AuthService.AuthState? {
@@ -270,7 +335,8 @@ struct OnboardingView: View {
     }
 
     private func configHomeDir() -> String? {
-        appState.gatewayMode == .freshInstall ? appState.openclawBasePath.path : nil
+        // Both modes use ~/.openclaw — no HOME override needed
+        nil
     }
 
     private func resetProviderSelection() {
@@ -309,111 +375,112 @@ struct OnboardingView: View {
     // MARK: - Step 0: Welcome
 
     private var welcomeStep: some View {
-        VStack(spacing: 34) {
-            VStack(spacing: 18) {
-                if let icon = NSApp.applicationIconImage {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .interpolation(.high)
-                        .frame(width: 108, height: 108)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        .shadow(color: .black.opacity(0.10), radius: 20, y: 10)
-                }
+        centeredStepContent {
+            VStack(spacing: 40) {
+                VStack(spacing: 16) {
+                    if let icon = NSApp.applicationIconImage {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: 108, height: 108)
+                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            .shadow(color: .black.opacity(0.10), radius: 20, y: 10)
+                    }
 
-                VStack(spacing: 12) {
-                    Text("虾忙 不是一个只会聊天的 AI。")
-                        .font(.system(size: 30, weight: .bold))
-                        .multilineTextAlignment(.center)
-                    Text("它更像一套运行在你自己设备上的个人工作台：能对话、记任务、做提醒、装技能、接管工具，也能在 macOS 和 iPhone 之间自然协同。数据留在你手里，能力按你的习惯长出来。")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 580)
+                    VStack(spacing: 8) {
+                        Text("「虾忙」")
+                            .font(.system(size: 30, weight: .bold))
+                        Text("天生忙碌")
+                            .font(.system(size: 22, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+
+                HStack(alignment: .top, spacing: 12) {
+                    featureCard(icon: "macwindow", title: "原生 macOS 应用", description: "专为 OpenClaw 开发的原生 macOS 应用，友好的配置界面，无需面对命令行。")
+                    featureCard(icon: "iphone", title: "跨设备协同", description: "直接与 iOS 端「虾忙」App 建立通讯，随时随地远程操控 OpenClaw。基于 iCloud 发送接收信息，完全本地保存所有数据。")
+                    featureCard(icon: "square.grid.2x2", title: "任务看板与记忆中枢", description: "新增任务看板和记忆中枢功能，更加可视化的与 OpenClaw 进行协作。")
                 }
             }
-            .frame(maxWidth: .infinity)
-
-            HStack(spacing: 14) {
-                featureCard(icon: "rectangle.on.rectangle.angled", title: "本地 Agent 工作台", description: "多 Agent 协作、任务分工和对话都在一处完成")
-                featureCard(icon: "clock.badge.checkmark", title: "任务与提醒", description: "对话、待办、定时动作和技能库彼此打通")
-                featureCard(icon: "lock.shield", title: "你自己掌控", description: "本地优先、能力可配、边界清楚，不被平台牵着走")
-            }
+            .frame(maxWidth: 760)
         }
-        .frame(maxWidth: 760)
     }
 
     private func featureCard(icon: String, title: String, description: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 40, height: 40)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: 34, height: 34)
+                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             Text(title)
-                .font(.headline)
+                .font(.subheadline.weight(.semibold))
             Text(description)
-                .font(.callout)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     // MARK: - Step 1: Detection
 
     private var detectionStep: some View {
-        onboardingCard(width: 620) {
-            VStack(spacing: 22) {
-                if isDetecting {
-                    ProgressView()
-                        .scaleEffect(1.25)
-                    Text("正在检查现有安装与配置…")
-                        .font(.title3.weight(.semibold))
-                    Text("如果你之前已经装过，我们会优先复用，别让你重复填一遍。")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                } else if existingInstallDetected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 52))
-                        .foregroundStyle(.green)
-                    Text("发现已有 OpenClaw 环境")
-                        .font(.title2.bold())
-                    Text("已在 ~/.openclaw 中识别到现有配置。你可以直接接着用，也可以从头重新配置一套。")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
+        centeredStepContent {
+            onboardingCard(width: 620) {
+                VStack(spacing: 22) {
+                    if isDetecting {
+                        ProgressView()
+                            .scaleEffect(1.25)
+                        Text("正在检查现有安装与配置…")
+                            .font(.title3.weight(.semibold))
+                        Text("如果你之前已经装过，可优先复用，直接继承已有的记忆和配置。")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    } else if existingInstallDetected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 52))
+                            .foregroundStyle(.green)
+                        Text("发现已有 OpenClaw 环境")
+                            .font(.title2.bold())
+                        Text("已在 ~/.openclaw 中识别到现有配置。你可以直接接着用，也可以重新配置一套。")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
 
-                    if detectedAgentCount > 0 {
-                        infoChip(text: "已发现 \(detectedAgentCount) 个 Agent", tint: .green)
-                    }
-
-                    VStack(spacing: 12) {
-                        largeActionButton(title: "继续使用现有配置", icon: "arrow.clockwise.circle.fill", prominence: .primary) {
-                            appState.gatewayMode = .existingInstall
-                            currentStep = existingAuthDetected ? 9 : 5
+                        if detectedAgentCount > 0 {
+                            infoChip(text: "已发现 \(detectedAgentCount) 个 Agent", tint: .green)
                         }
 
-                        largeActionButton(title: "重新开始配置", icon: "sparkles", prominence: .secondary) {
-                            appState.gatewayMode = .freshInstall
-                            currentStep = 2
+                        VStack(spacing: 12) {
+                            largeActionButton(title: "继续使用现有配置", icon: "arrow.clockwise.circle.fill", prominence: .primary) {
+                                appState.gatewayMode = .existingInstall
+                                navigateToStep(existingAuthDetected ? 9 : 5, direction: .trailing)
+                            }
+
+                            largeActionButton(title: "重新开始配置", icon: "sparkles", prominence: .secondary) {
+                                appState.gatewayMode = .freshInstall
+                                navigateToStep(2, direction: .trailing)
+                            }
                         }
+                        .frame(maxWidth: 360)
+                    } else {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 52))
+                            .foregroundStyle(Color.accentColor)
+                        Text("这是一次全新配置")
+                            .font(.title2.bold())
+                        Text("我们会帮你搭好一套新的本地 AI 工作台，几步走完就能开始用。")
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
-                    .frame(maxWidth: 360)
-                } else {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 52))
-                        .foregroundStyle(Color.accentColor)
-                    Text("这是一次全新配置")
-                        .font(.title2.bold())
-                    Text("我们会帮你搭好一套新的本地 AI 工作台，几步走完就能开始用。")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
                 }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
         }
         .task {
             await detectExistingInstall()
@@ -446,7 +513,7 @@ struct OnboardingView: View {
             existingInstallDetected = false
             appState.gatewayMode = .freshInstall
             try? await Task.sleep(for: .seconds(1))
-            currentStep = 2
+            navigateToStep(2, direction: .trailing)
         }
 
         isDetecting = false
@@ -455,30 +522,32 @@ struct OnboardingView: View {
     // MARK: - Step 2: Name
 
     private var nameStep: some View {
-        onboardingCard {
-            VStack(alignment: .leading, spacing: 28) {
-                sectionIntro(title: "先定一个称呼和形象", description: "这是你以后每天都会看到的默认设定。先选个顺眼的，后面再改也很方便。")
+        centeredStepContent {
+            onboardingCard {
+                VStack(alignment: .leading, spacing: 28) {
+                    sectionIntro(title: "先定一个称呼和形象", description: "这是你以后每天都会看到的默认设定。先选个顺眼的，后面再改也很方便。")
 
-                VStack(alignment: .leading, spacing: 14) {
-                    fieldLabel("名字")
-                    largeTextField("给 TA 起个名字", text: $agentName)
-                }
+                    VStack(alignment: .leading, spacing: 14) {
+                        fieldLabel("名字")
+                        largeTextField("给 TA 起个名字", text: $agentName)
+                    }
 
-                VStack(alignment: .leading, spacing: 14) {
-                    fieldLabel("主视觉 Emoji")
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 12)], spacing: 12) {
-                        ForEach(["🤖", "🦉", "🐱", "🧙", "🦊", "🐸", "⚡", "🎭"], id: \.self) { emoji in
-                            let isSelected = agentEmoji == emoji
-                            Button {
-                                agentEmoji = emoji
-                            } label: {
-                                Text(emoji)
-                                    .font(.system(size: 28))
-                                    .frame(maxWidth: .infinity)
-                                    .frame(height: 60)
-                                    .background(selectionBackground(isSelected))
+                    VStack(alignment: .leading, spacing: 14) {
+                        fieldLabel("主视觉 Emoji")
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 64), spacing: 12)], spacing: 12) {
+                            ForEach(["🤖", "🦉", "🐱", "🧙", "🦊", "🐸", "🐰", "🐶"], id: \.self) { emoji in
+                                let isSelected = agentEmoji == emoji
+                                Button {
+                                    agentEmoji = emoji
+                                } label: {
+                                    Text(emoji)
+                                        .font(.system(size: 28))
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 60)
+                                        .background(selectionBackground(isSelected))
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -489,7 +558,7 @@ struct OnboardingView: View {
     // MARK: - Step 3: Personality
 
     private var personalityStep: some View {
-        ScrollView {
+        centeredStepContent(scrolls: true) {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 26) {
                     sectionIntro(title: "把相处方式一次说清楚", description: "虾忙 可以有态度，但别搞成戏精。把风格定好，后面省心很多。")
@@ -532,7 +601,6 @@ struct OnboardingView: View {
             }
             .padding(.vertical, 4)
         }
-        .scrollIndicators(.hidden)
     }
 
     private var proactivenessHint: String {
@@ -574,7 +642,7 @@ struct OnboardingView: View {
     // MARK: - Step 4: User Info + Scenarios
 
     private var userInfoStep: some View {
-        ScrollView {
+        centeredStepContent(scrolls: true) {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 24) {
                     sectionIntro(title: "让 虾忙 更懂你", description: "不用填很多，只把影响协作体验的关键信息告诉它。")
@@ -612,7 +680,6 @@ struct OnboardingView: View {
             }
             .padding(.vertical, 4)
         }
-        .scrollIndicators(.hidden)
     }
 
     private func tagGrid(options: [String], selected: Binding<Set<String>>) -> some View {
@@ -650,7 +717,7 @@ struct OnboardingView: View {
     // MARK: - Step 5: Provider + Auth
 
     private var providerStep: some View {
-        ScrollView {
+        centeredStepContent(scrolls: true) {
             onboardingCard(width: selectedProvider == nil ? 720 : 860) {
                 VStack(alignment: .leading, spacing: 18) {
                     sectionIntro(title: "选一个最顺手的 AI 大脑", description: "先选模型，再在同一页完成认证。逻辑不变，只是把信息整理得更清楚。")
@@ -672,36 +739,36 @@ struct OnboardingView: View {
                     .frame(maxWidth: .infinity, alignment: selectedProvider == nil ? .center : .leading)
                 }
             }
-            .padding(.vertical, 4)
+            .padding(.top, 4)
+            .padding(.bottom, 12)
         }
-        .scrollIndicators(.hidden)
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
     }
 
     @ViewBuilder
     private func providerAuthContent(for provider: AuthService.Provider) -> some View {
-        LazyVGrid(columns: authMethodColumns, alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             switch provider {
             case .anthropic:
-                authMethodGroup {
+                authMethodGroup(title: "使用浏览器创建 API Key") {
                     keyInputSection(provider: .anthropic, flow: .anthropicAPIKey)
                 }
-                authMethodGroup {
+                authMethodGroup(title: "或者使用 Claude CLI Setup Token") {
                     setupTokenSection
                 }
             case .openai:
-                authMethodGroup {
-                    keyInputSection(provider: .openai, flow: .openAIAPIKey)
-                }
-                authMethodGroup {
+                authMethodGroup(title: "先用 OpenAI 账号授权") {
                     openAIOAuthSection
                 }
-            case .minimax:
-                authMethodGroup {
-                    minimaxKeyInputSection
+                authMethodGroup(title: "或者手动填写 API Key") {
+                    keyInputSection(provider: .openai, flow: .openAIAPIKey)
                 }
-                authMethodGroup {
+            case .minimax:
+                authMethodGroup(title: "先用 MiniMax 账号授权") {
                     minimaxOAuthSection
+                }
+                authMethodGroup(title: "或者手动填写 API Key") {
+                    minimaxKeyInputSection
                 }
             case .kimi:
                 authMethodGroup {
@@ -729,6 +796,7 @@ struct OnboardingView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func providerRow(_ option: ProviderOption) -> some View {
@@ -762,17 +830,30 @@ struct OnboardingView: View {
         }
     }
 
-    private func authMethodGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func authMethodGroup<Content: View>(title: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let title {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
             content()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+        )
     }
 
     // MARK: - Step 6: Skills
 
     private var skillsStep: some View {
-        ScrollView {
+        centeredStepContent(scrolls: true) {
             onboardingCard {
                 VStack(alignment: .leading, spacing: 20) {
                     HStack(alignment: .top) {
@@ -780,14 +861,8 @@ struct OnboardingView: View {
                         Spacer(minLength: 16)
                     }
 
-                    if skillsService.isLoading {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                            Text("正在加载技能列表…")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 36)
+                    if shouldShowSkillsLoading {
+                        skillsLoadingState
                     } else if let error = skillsService.errorMessage {
                         VStack(alignment: .leading, spacing: 12) {
                             Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -805,7 +880,7 @@ struct OnboardingView: View {
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 28)
                     } else {
-                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+                        LazyVStack(spacing: 10) {
                             ForEach(skillsService.skills) { skill in
                                 onboardingSkillRow(skill)
                             }
@@ -815,30 +890,94 @@ struct OnboardingView: View {
             }
             .padding(.vertical, 4)
         }
-        .scrollIndicators(.hidden)
         .task {
             await ensureSkillsLoaded()
         }
     }
 
-    private func onboardingSkillRow(_ skill: Skill) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(skill.displayEmoji)
-                        .font(.title3)
-                    Text(skill.name)
-                        .font(.headline)
-                }
+    private var shouldShowSkillsLoading: Bool {
+        !didLoadSkills || skillsService.isLoading
+    }
 
-                if let description = skill.description {
-                    Text(description)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
+    private var skillsLoadingState: some View {
+        VStack(spacing: 18) {
+            ProgressView()
+                .controlSize(.regular)
+                .scaleEffect(1.05)
+
+            VStack(spacing: 6) {
+                Text("正在加载可配置技能…")
+                    .font(.system(size: 15, weight: .semibold))
+                Text("先把技能清单拉回来，加载完再告诉你有哪些能开。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             }
 
-            Spacer(minLength: 12)
+            VStack(spacing: 10) {
+                ForEach(0..<3, id: \.self) { _ in
+                    skillsLoadingPlaceholderRow
+                }
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 28)
+        .transition(.opacity)
+    }
+
+    private var skillsLoadingPlaceholderRow: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.secondary.opacity(0.12))
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 8) {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.14))
+                    .frame(width: 132, height: 12)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.secondary.opacity(0.10))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 10)
+            }
+
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 22)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.secondary.opacity(0.10), lineWidth: 1)
+        )
+        .redacted(reason: .placeholder)
+    }
+
+    private func onboardingSkillRow(_ skill: Skill) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            HStack(spacing: 10) {
+                Text(skill.displayEmoji)
+                    .font(.system(size: 20))
+                    .frame(width: 28, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(skill.name)
+                        .font(.system(size: 14, weight: .semibold))
+
+                    if let description = skill.description {
+                        Text(description)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Toggle("", isOn: Binding(
                 get: { !skill.disabled },
@@ -849,14 +988,15 @@ struct OnboardingView: View {
             .labelsHidden()
             .toggleStyle(.switch)
             .controlSize(.small)
-            .scaleEffect(0.92)
+            .scaleEffect(0.88)
             .disabled(!skill.canBeEnabled)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(skill.canBeEnabled ? Color.secondary.opacity(0.12) : Color.orange.opacity(0.26), lineWidth: 1)
         )
     }
@@ -917,11 +1057,11 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             switch stateForActiveFlow(.openAIOAuth) ?? .idle {
             case .idle:
-                largeActionButton(title: "使用 OpenAI 账号登录", icon: "person.crop.circle.badge.checkmark", prominence: .primary, tint: .green) {
+                authActionButton(title: "使用 OpenAI 账号登录", icon: "person.crop.circle.badge.checkmark", tint: .green) {
                     activeAuthFlow = .openAIOAuth
                     authService.authenticateOpenAIOAuth(homeDir: configHomeDir())
                 }
-                .frame(width: 240)
+                .frame(maxWidth: 240, alignment: .leading)
             case .launching:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -937,12 +1077,12 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
 
-                largeActionButton(title: "打开浏览器", icon: "safari", prominence: .secondary, tint: .green) {
+                authActionButton(title: "打开浏览器", icon: "safari", tint: .green, prominence: .secondary) {
                     if let browserURL = URL(string: url) {
                         NSWorkspace.shared.open(browserURL)
                     }
                 }
-                .frame(width: 170)
+                .frame(maxWidth: 164, alignment: .leading)
             case .waitingForCode:
                 EmptyView()
             case .verified:
@@ -956,13 +1096,44 @@ struct OnboardingView: View {
                 .font(.callout)
             case .error(let message):
                 authErrorLabel(message)
-                largeActionButton(title: "重试", icon: "arrow.clockwise", prominence: .primary, tint: .green) {
+                authActionButton(title: "重试", icon: "arrow.clockwise", tint: .green, prominence: .secondary) {
                     activeAuthFlow = .openAIOAuth
                     authService.authenticateOpenAIOAuth(homeDir: configHomeDir())
                 }
-                .frame(width: 120)
+                .frame(maxWidth: 120, alignment: .leading)
             case .modelSelection:
-                EmptyView()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("选择模型")
+                        .font(.subheadline.bold())
+
+                    Picker("模型", selection: Binding(
+                        get: { authService.selectedModelId ?? "" },
+                        set: { authService.selectedModelId = $0 }
+                    )) {
+                        ForEach(authService.availableModels) { model in
+                            Text(model.displayName).tag(model.id)
+                        }
+                    }
+                    .pickerStyle(.menu)
+
+                    authActionButton(title: "确认模型", icon: "checkmark", tint: .green) {
+                        guard let modelId = authService.selectedModelId else { return }
+                        activeAuthFlow = .openAIOAuth
+                        authService.persistOpenAIOAuthWithModel(
+                            modelId: modelId,
+                            homeDir: configHomeDir()
+                        )
+                    }
+                    .frame(width: 136)
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.blue)
+                        Text("请选择你要使用的模型")
+                            .foregroundStyle(.blue)
+                    }
+                    .font(.caption)
+                }
             }
         }
     }
@@ -1004,11 +1175,11 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 14) {
             switch stateForActiveFlow(.minimaxOAuth) ?? .idle {
             case .idle:
-                largeActionButton(title: "使用 MiniMax 账号登录", icon: "person.crop.circle.badge.checkmark", prominence: .primary, tint: .orange) {
+                authActionButton(title: "使用 MiniMax 账号登录", icon: "person.crop.circle.badge.checkmark", tint: .orange) {
                     activeAuthFlow = .minimaxOAuth
                     authService.authenticateMinimaxOAuth(homeDir: configHomeDir())
                 }
-                .frame(width: 240)
+                .frame(maxWidth: 240, alignment: .leading)
             case .launching:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -1035,12 +1206,12 @@ struct OnboardingView: View {
                 }
                 .font(.callout)
 
-                largeActionButton(title: "重新打开浏览器", icon: "safari", prominence: .secondary, tint: .orange) {
+                authActionButton(title: "重新打开浏览器", icon: "safari", tint: .orange, prominence: .secondary) {
                     if let browserURL = URL(string: url) {
                         NSWorkspace.shared.open(browserURL)
                     }
                 }
-                .frame(width: 190)
+                .frame(maxWidth: 176, alignment: .leading)
             case .waitingForBrowser:
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -1059,11 +1230,11 @@ struct OnboardingView: View {
                 .font(.callout)
             case .error(let message):
                 authErrorLabel(message)
-                largeActionButton(title: "重试", icon: "arrow.clockwise", prominence: .primary, tint: .orange) {
+                authActionButton(title: "重试", icon: "arrow.clockwise", tint: .orange, prominence: .secondary) {
                     activeAuthFlow = .minimaxOAuth
                     authService.authenticateMinimaxOAuth(homeDir: configHomeDir())
                 }
-                .frame(width: 120)
+                .frame(maxWidth: 120, alignment: .leading)
             case .modelSelection:
                 EmptyView()
             }
@@ -1168,7 +1339,7 @@ struct OnboardingView: View {
                     }
                     .pickerStyle(.menu)
 
-                    largeActionButton(title: "确认模型", icon: "checkmark", prominence: .primary, tint: tint) {
+                    authActionButton(title: "确认模型", icon: "checkmark", tint: tint) {
                         guard let modelId = authService.selectedModelId else { return }
                         activeAuthFlow = flow
                         authService.persistQwenWithSelectedModel(
@@ -1177,7 +1348,7 @@ struct OnboardingView: View {
                             homeDir: configHomeDir()
                         )
                     }
-                    .frame(width: 150)
+                    .frame(width: 136)
                 }
             }
 
@@ -1285,15 +1456,17 @@ struct OnboardingView: View {
     // MARK: - Step 7: Tools Profile
 
     private var toolsProfileStep: some View {
-        onboardingCard {
-            VStack(alignment: .leading, spacing: 20) {
-                sectionIntro(title: "给 虾忙 划清工具边界", description: "能力和边界一起设计，才是能长期用下去的体验。")
+        centeredStepContent {
+            onboardingCard {
+                VStack(alignment: .leading, spacing: 20) {
+                    sectionIntro(title: "给 虾忙 划清工具边界", description: "能力和边界一起设计，才是能长期用下去的体验。")
 
-                VStack(spacing: 12) {
-                    toolsProfileCard(id: "full", emoji: "🔓", title: "完整 Full", desc: "开放全部工具：文件、终端、浏览器、消息等")
-                    toolsProfileCard(id: "coding", emoji: "💻", title: "编程 Coding", desc: "更适合开发工作：读写文件、执行命令、处理工程")
-                    toolsProfileCard(id: "messaging", emoji: "💬", title: "消息 Messaging", desc: "主打消息、搜索、记忆等安全工具，不碰系统能力")
-                    toolsProfileCard(id: "minimal", emoji: "🔒", title: "精简 Minimal", desc: "边界最小，基本只保留对话能力")
+                    VStack(spacing: 12) {
+                        toolsProfileCard(id: "full", emoji: "🔓", title: "完整 Full", desc: "开放全部工具：文件、终端、浏览器、消息等")
+                        toolsProfileCard(id: "coding", emoji: "💻", title: "编程 Coding", desc: "更适合开发工作：读写文件、执行命令、处理工程")
+                        toolsProfileCard(id: "messaging", emoji: "💬", title: "消息 Messaging", desc: "主打消息、搜索、记忆等安全工具，不碰系统能力")
+                        toolsProfileCard(id: "minimal", emoji: "🔒", title: "精简 Minimal", desc: "边界最小，基本只保留对话能力")
+                    }
                 }
             }
         }
@@ -1324,29 +1497,31 @@ struct OnboardingView: View {
     // MARK: - Step 8: Permissions
 
     private var permissionsStep: some View {
-        onboardingCard {
-            VStack(alignment: .leading, spacing: 16) {
-                sectionIntro(title: "打开关键系统权限", description: "不开也能用，但如果你希望它真的替你干活，这几项最好开上。")
+        centeredStepContent {
+            onboardingCard {
+                VStack(alignment: .leading, spacing: 16) {
+                    sectionIntro(title: "打开关键系统权限", description: "不开也能用，但如果你希望它真的替你干活，这几项最好开上。")
 
-                VStack(spacing: 12) {
-                    ForEach(PermissionCapability.allCases) { cap in
-                        permissionRow(cap)
-                    }
-                }
-
-                HStack {
-                    largeActionButton(title: "刷新状态", icon: "arrow.clockwise", prominence: .secondary) {
-                        Task {
-                            permissionStatus = await PermissionManager.shared.status()
+                    VStack(spacing: 12) {
+                        ForEach(PermissionCapability.allCases) { cap in
+                            permissionRow(cap)
                         }
                     }
-                    .frame(width: 150)
 
-                    Spacer()
+                    HStack {
+                        largeActionButton(title: "刷新状态", icon: "arrow.clockwise", prominence: .secondary) {
+                            Task {
+                                permissionStatus = await PermissionManager.shared.status()
+                            }
+                        }
+                        .frame(width: 150)
 
-                    Text("所有权限都可以稍后在系统设置里调整。")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        Spacer()
+
+                        Text("所有权限都可以稍后在系统设置里调整。")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
@@ -1407,44 +1582,46 @@ struct OnboardingView: View {
     // MARK: - Step 9: Ready
 
     private var readyStep: some View {
-        onboardingCard(width: 620) {
-            VStack(spacing: 22) {
-                if appState.gatewayMode == .existingInstall {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 62))
-                        .foregroundStyle(.green)
-                    Text("一切就绪")
-                        .font(.system(size: 30, weight: .bold))
+        centeredStepContent {
+            onboardingCard(width: 620) {
+                VStack(spacing: 22) {
+                    if appState.gatewayMode == .existingInstall {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 62))
+                            .foregroundStyle(.green)
+                        Text("一切就绪")
+                            .font(.system(size: 30, weight: .bold))
 
-                    VStack(spacing: 8) {
-                        Text("已识别到你的 OpenClaw 配置")
-                            .font(.title3.weight(.semibold))
-                        Text("直接开始对话就行，原来的环境会继续接着跑。")
+                        VStack(spacing: 8) {
+                            Text("已识别到你的 OpenClaw 配置")
+                                .font(.title3.weight(.semibold))
+                            Text("直接开始对话就行，原来的环境会继续接着跑。")
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(20)
+                        .frame(maxWidth: .infinity)
+                        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    } else {
+                        Text(agentEmoji)
+                            .font(.system(size: 70))
+                        Text(agentName)
+                            .font(.system(size: 30, weight: .bold))
+
+                        Text(readySummary)
+                            .font(.title3)
                             .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: 460)
+
+                        Text("📱 iPhone 端可在 App Store 搜索「虾忙」下载，用来远程连接和继续处理你的任务。")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .multilineTextAlignment(.center)
+                            .padding(.top, 4)
                     }
-                    .padding(20)
-                    .frame(maxWidth: .infinity)
-                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-                } else {
-                    Text(agentEmoji)
-                        .font(.system(size: 70))
-                    Text(agentName)
-                        .font(.system(size: 30, weight: .bold))
-
-                    Text(readySummary)
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 460)
-
-                    Text("📱 iPhone 端可在 App Store 搜索「虾忙」下载，用来远程连接和继续处理你的任务。")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 4)
                 }
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: .infinity)
         }
     }
 
@@ -1466,6 +1643,73 @@ struct OnboardingView: View {
     }
 
     // MARK: - Shared UI
+
+    private func centeredStepContent<Content: View>(scrolls: Bool = false, @ViewBuilder content: @escaping () -> Content) -> some View {
+        OnboardingStepContainer(scrolls: scrolls, content: content)
+    }
+
+    private struct OnboardingStepContainer<Content: View>: View {
+        let scrolls: Bool
+        @ViewBuilder var content: () -> Content
+
+        @State private var contentHeight: CGFloat = 0
+
+        var body: some View {
+            GeometryReader { proxy in
+                let availableHeight = max(proxy.size.height - 12, 0)
+
+                Group {
+                    if scrolls {
+                        ScrollView {
+                            stepBody(availableHeight: availableHeight)
+                        }
+                        .scrollIndicators(.hidden)
+                    } else {
+                        stepBody(availableHeight: availableHeight)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            }
+        }
+
+        @ViewBuilder
+        private func stepBody(availableHeight: CGFloat) -> some View {
+            let shouldCenter = contentHeight > 0 && contentHeight <= availableHeight
+
+            VStack(spacing: 0) {
+                if shouldCenter {
+                    Spacer(minLength: 0)
+                }
+
+                content()
+                    .background(contentHeightReader)
+
+                if shouldCenter {
+                    Spacer(minLength: 0)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: shouldCenter ? availableHeight : nil, alignment: shouldCenter ? .center : .top)
+            .padding(.vertical, 6)
+        }
+
+        private var contentHeightReader: some View {
+            GeometryReader { geometry in
+                Color.clear
+                    .preference(key: OnboardingStepContentHeightKey.self, value: geometry.size.height)
+            }
+            .onPreferenceChange(OnboardingStepContentHeightKey.self) { newHeight in
+                contentHeight = newHeight
+            }
+        }
+    }
+
+    private struct OnboardingStepContentHeightKey: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+            value = nextValue()
+        }
+    }
 
     private func onboardingCard<Content: View>(width: CGFloat = 720, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1499,12 +1743,12 @@ struct OnboardingView: View {
     private func largeTextField(_ placeholder: String, text: Binding<String>) -> some View {
         TextField(placeholder, text: text)
             .textFieldStyle(.plain)
-            .font(.system(size: 16))
-            .padding(.horizontal, 18)
-            .frame(height: 50)
-            .background(Color(nsColor: .textBackgroundColor), in: Capsule())
+            .font(.system(size: 15))
+            .padding(.horizontal, 16)
+            .frame(height: authControlHeight)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: formCornerRadius, style: .continuous))
             .overlay(
-                Capsule()
+                RoundedRectangle(cornerRadius: formCornerRadius, style: .continuous)
                     .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
             )
     }
@@ -1549,22 +1793,27 @@ struct OnboardingView: View {
         case secondary
     }
 
-    private func largeActionButton(title: String, icon: String, prominence: ButtonProminence, tint: Color = .accentColor, action: @escaping () -> Void) -> some View {
+    private enum AuthActionProminence {
+        case primary
+        case secondary
+    }
+
+    private func largeActionButton(title: String, icon: String, prominence: ButtonProminence, tint: Color = .accentColor, height: CGFloat = 42, action: @escaping () -> Void) -> some View {
         Group {
             if prominence == .primary {
                 Button(action: action) {
                     Label(title, systemImage: icon)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 46)
+                        .frame(height: height)
                 }
                 .buttonStyle(.borderedProminent)
             } else {
                 Button(action: action) {
                     Label(title, systemImage: icon)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .frame(maxWidth: .infinity)
-                        .frame(height: 46)
+                        .frame(height: height)
                 }
                 .buttonStyle(.bordered)
             }
@@ -1601,6 +1850,39 @@ struct OnboardingView: View {
         }
     }
 
+    private func authActionButton(
+        title: String,
+        icon: String,
+        tint: Color,
+        prominence: AuthActionProminence = .primary,
+        action: @escaping () -> Void
+    ) -> some View {
+        let background = prominence == .primary ? tint.opacity(0.12) : Color(nsColor: .controlBackgroundColor)
+        let border = prominence == .primary ? tint.opacity(0.24) : Color.secondary.opacity(0.14)
+
+        let minWidth = prominence == .primary ? authPrimaryButtonMinWidth : authSecondaryButtonMinWidth
+
+        return Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .foregroundStyle(Color.primary.opacity(0.92))
+            }
+            .font(.system(size: 14, weight: .semibold))
+            .padding(.horizontal, prominence == .primary ? 16 : 14)
+            .frame(minWidth: minWidth)
+            .frame(height: authControlHeight)
+            .background(background, in: RoundedRectangle(cornerRadius: authControlCornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: authControlCornerRadius, style: .continuous)
+                    .stroke(border, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private func authInputRow(
         placeholder: String,
         text: Binding<String>,
@@ -1609,43 +1891,57 @@ struct OnboardingView: View {
         state: AuthService.AuthState?,
         action: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 12) {
+        let isVerifying = state == .verifying
+        let isVerified = isAuthenticated || state == .verified
+        let actionTint = isVerified ? Color.green : tint
+        let isDisabled = text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isVerifying || isAuthenticated
+
+        return HStack(spacing: 0) {
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
-                .font(.system(.body, design: .monospaced))
-                .padding(.horizontal, 18)
-                .frame(height: 46)
-                .background(Color(nsColor: .textBackgroundColor), in: Capsule())
-                .overlay(
-                    Capsule()
-                        .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-                )
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                .padding(.leading, 16)
+                .padding(.trailing, 14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .disabled(isAuthenticated)
 
-            Button(action: action) {
-                switch state {
-                case .verifying:
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 84)
-                case .verified:
-                    Label("已验证", systemImage: "checkmark.circle.fill")
-                        .frame(width: 112)
-                default:
-                    Text("验证")
-                        .frame(width: 92)
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(isAuthenticated ? .green : tint)
-            .controlSize(.large)
-            .frame(height: 46)
-            .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || currentAuthState == .verifying || isAuthenticated)
-        }
-    }
-}
+            Rectangle()
+                .fill(Color.secondary.opacity(0.14))
+                .frame(width: 1)
+                .padding(.vertical, 10)
 
-private struct ArrowNavigationButton: View {
+            Button(action: action) {
+                HStack(spacing: 6) {
+                    if isVerifying {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else if isVerified {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text("已验证")
+                    } else {
+                        Text("验证")
+                    }
+                }
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(actionTint)
+                .frame(minWidth: authActionMinWidth)
+                .frame(maxHeight: .infinity)
+                .padding(.horizontal, 12)
+                .background(actionTint.opacity(isDisabled && !isVerified ? 0.05 : 0.10))
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+        }
+        .frame(height: authControlHeight)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: authControlCornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: authControlCornerRadius, style: .continuous)
+                .stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: authControlCornerRadius, style: .continuous))
+    }
+
+    private struct ArrowNavigationButton: View {
     enum Direction {
         case back
         case forward
@@ -1662,27 +1958,30 @@ private struct ArrowNavigationButton: View {
     let disabled: Bool
     var highlight: Bool = false
     let action: () -> Void
+    private let size: CGFloat = 46
 
     var body: some View {
         let isForwardHighlight = direction == .forward && highlight && !disabled
 
         Button(action: action) {
             Image(systemName: direction.systemImage)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(disabled ? AnyShapeStyle(Color.secondary.opacity(0.55)) : AnyShapeStyle(isForwardHighlight ? Color.white : Color.primary))
-                .frame(width: 56, height: 56)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(disabled ? AnyShapeStyle(Color.secondary.opacity(0.5)) : AnyShapeStyle(isForwardHighlight ? Color.white : Color.primary.opacity(0.88)))
+                .frame(width: size, height: size)
                 .background(
                     Circle()
-                        .fill(disabled ? Color.secondary.opacity(0.08) : (isForwardHighlight ? Color.accentColor : Color(nsColor: .controlBackgroundColor)))
+                        .fill(disabled ? Color.secondary.opacity(0.05) : (isForwardHighlight ? Color.accentColor : Color(nsColor: .controlBackgroundColor).opacity(0.82)))
                 )
                 .overlay(
                     Circle()
-                        .stroke(disabled ? Color.secondary.opacity(0.10) : (isForwardHighlight ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.16)), lineWidth: 1)
+                        .stroke(disabled ? Color.secondary.opacity(0.08) : (isForwardHighlight ? Color.accentColor.opacity(0.82) : Color.primary.opacity(0.08)), lineWidth: 1)
                 )
-                .shadow(color: .black.opacity(disabled ? 0 : (isForwardHighlight ? 0.16 : 0.08)), radius: isForwardHighlight ? 16 : 12, y: 6)
+                .shadow(color: .black.opacity(disabled ? 0 : (isForwardHighlight ? 0.10 : 0.03)), radius: isForwardHighlight ? 10 : 6, y: 3)
         }
         .buttonStyle(.plain)
         .disabled(disabled)
         .accessibilityLabel(direction == .back ? "上一步" : "下一步")
     }
+    }
+
 }

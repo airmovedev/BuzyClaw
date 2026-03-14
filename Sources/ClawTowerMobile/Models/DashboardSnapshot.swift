@@ -38,26 +38,115 @@ struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
     let emoji: String?
     let isOnline: Bool?
     let currentModel: String?
+    let configuredModel: String?
+    let effectiveModel: String?
+    let currentDisplayModel: String?
+    let availableModels: [String]?
+    let heartbeatModel: String?
     let tokenUsage: Int?
     let identityEmoji: String?
     let identityName: String?
     let creature: String?
     let vibe: String?
     let lastMessage: String?
+    let latestModelCommand: AgentModelCommandStatus?
 
-    init(id: String, displayName: String, emoji: String?, isOnline: Bool? = nil, currentModel: String? = nil, tokenUsage: Int? = nil, identityEmoji: String? = nil, identityName: String? = nil, creature: String? = nil, vibe: String? = nil, lastMessage: String? = nil) {
+    init(
+        id: String,
+        displayName: String,
+        emoji: String?,
+        isOnline: Bool? = nil,
+        currentModel: String? = nil,
+        configuredModel: String? = nil,
+        effectiveModel: String? = nil,
+        currentDisplayModel: String? = nil,
+        availableModels: [String]? = nil,
+        heartbeatModel: String? = nil,
+        tokenUsage: Int? = nil,
+        identityEmoji: String? = nil,
+        identityName: String? = nil,
+        creature: String? = nil,
+        vibe: String? = nil,
+        lastMessage: String? = nil,
+        latestModelCommand: AgentModelCommandStatus? = nil
+    ) {
         self.id = id
         self.displayName = displayName
         self.emoji = emoji
         self.isOnline = isOnline
-        self.currentModel = currentModel
+        let resolvedDisplayModel = currentDisplayModel ?? currentModel
+        self.currentModel = resolvedDisplayModel
+        self.configuredModel = configuredModel
+        self.effectiveModel = effectiveModel
+        self.currentDisplayModel = resolvedDisplayModel
+        self.availableModels = availableModels
+        self.heartbeatModel = heartbeatModel
         self.tokenUsage = tokenUsage
         self.identityEmoji = identityEmoji
         self.identityName = identityName
         self.creature = creature
         self.vibe = vibe
         self.lastMessage = lastMessage
+        self.latestModelCommand = latestModelCommand
     }
+
+    var resolvedWorkingModel: String? {
+        let candidates = [currentDisplayModel, effectiveModel, configuredModel, currentModel]
+        return candidates.first { candidate in
+            guard let candidate else { return false }
+            let normalized = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !normalized.isEmpty && normalized != "default"
+        } ?? nil
+    }
+
+    func merged(with incoming: AgentSnapshot) -> AgentSnapshot {
+        AgentSnapshot(
+            id: incoming.id,
+            displayName: incoming.displayName,
+            emoji: AgentSnapshot.preferredNonEmpty(incoming.emoji, emoji),
+            isOnline: incoming.isOnline ?? isOnline,
+            currentModel: AgentSnapshot.preferredNonEmpty(incoming.currentDisplayModel, incoming.currentModel, currentDisplayModel, currentModel),
+            configuredModel: AgentSnapshot.preferredNonEmpty(incoming.configuredModel, configuredModel),
+            effectiveModel: AgentSnapshot.preferredNonEmpty(incoming.effectiveModel, effectiveModel),
+            currentDisplayModel: AgentSnapshot.preferredNonEmpty(incoming.currentDisplayModel, incoming.currentModel, currentDisplayModel, currentModel),
+            availableModels: AgentSnapshot.preferredArray(incoming.availableModels, availableModels),
+            heartbeatModel: AgentSnapshot.preferredNonEmpty(incoming.heartbeatModel, heartbeatModel),
+            tokenUsage: incoming.tokenUsage ?? tokenUsage,
+            identityEmoji: AgentSnapshot.preferredNonEmpty(incoming.identityEmoji, identityEmoji, incoming.emoji, emoji),
+            identityName: AgentSnapshot.preferredNonEmpty(incoming.identityName, identityName, incoming.displayName, displayName),
+            creature: AgentSnapshot.preferredNonEmpty(incoming.creature, creature),
+            vibe: AgentSnapshot.preferredNonEmpty(incoming.vibe, vibe),
+            lastMessage: AgentSnapshot.preferredNonEmpty(incoming.lastMessage, lastMessage),
+            latestModelCommand: incoming.latestModelCommand ?? latestModelCommand
+        )
+    }
+
+    private static func preferredNonEmpty(_ candidates: String?...) -> String? {
+        candidates.first { candidate in
+            guard let candidate else { return false }
+            return !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? nil
+    }
+
+    private static func preferredArray(_ candidates: [String]?...) -> [String]? {
+        candidates.first { candidate in
+            guard let candidate else { return false }
+            return !candidate.isEmpty
+        } ?? nil
+    }
+}
+
+struct AgentModelCommandStatus: Codable, Hashable, Sendable {
+    let requestID: String
+    let requestedModel: String
+    let status: String
+    let requestedAt: Date?
+    let updatedAt: Date?
+    let errorMessage: String?
+
+    var isPending: Bool { status == ModelChangeCommandRecord.Status.pending.rawValue }
+    var isApplied: Bool { status == ModelChangeCommandRecord.Status.applied.rawValue }
+    var isFailed: Bool { status == ModelChangeCommandRecord.Status.failed.rawValue }
 }
 
 struct ProjectSnapshot: Identifiable, Codable, Hashable, Sendable {
@@ -163,8 +252,6 @@ struct SecondBrainDocSnapshot: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
-// MARK: - CloudKit Record Helpers
-
 enum DashboardSnapshotRecord {
     static let recordType = "DashboardSnapshot"
     static let recordName = "latest-dashboard"
@@ -188,5 +275,88 @@ enum DashboardSnapshotRecord {
         guard let json = record["payload"] as? String,
               let data = json.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(DashboardSnapshot.self, from: data)
+    }
+}
+
+enum ModelChangeCommandRecord {
+    static let recordType = "ModelChange"
+
+    enum Status: String, Codable, Sendable {
+        case pending
+        case applied
+        case failed
+    }
+
+    struct Payload: Codable, Sendable {
+        let requestID: String
+        let agentId: String
+        let model: String
+        let timestamp: Date
+        let status: Status
+        let processedAt: Date?
+        let errorMessage: String?
+
+        var snapshotStatus: AgentModelCommandStatus {
+            AgentModelCommandStatus(
+                requestID: requestID,
+                requestedModel: model,
+                status: status.rawValue,
+                requestedAt: timestamp,
+                updatedAt: processedAt ?? timestamp,
+                errorMessage: errorMessage
+            )
+        }
+    }
+
+    static func recordID(agentId: String) -> CKRecord.ID {
+        CKRecord.ID(recordName: "ModelChange-\(agentId)", zoneID: CloudKitConstants.zoneID)
+    }
+
+    static func makeRecord(payload: Payload) -> CKRecord {
+        let record = CKRecord(recordType: recordType, recordID: recordID(agentId: payload.agentId))
+        apply(payload, to: record)
+        return record
+    }
+
+    static func apply(_ payload: Payload, to record: CKRecord) {
+        record["requestID"] = payload.requestID as CKRecordValue
+        record["agentId"] = payload.agentId as CKRecordValue
+        record["model"] = payload.model as CKRecordValue
+        record["timestamp"] = payload.timestamp as CKRecordValue
+        record["status"] = payload.status.rawValue as CKRecordValue
+        if let processedAt = payload.processedAt {
+            record["processedAt"] = processedAt as CKRecordValue
+        } else {
+            record["processedAt"] = nil
+        }
+        if let errorMessage = payload.errorMessage, !errorMessage.isEmpty {
+            record["errorMessage"] = errorMessage as CKRecordValue
+        } else {
+            record["errorMessage"] = nil
+        }
+    }
+
+    static func payload(from record: CKRecord) -> Payload? {
+        guard let requestID = record["requestID"] as? String,
+              let agentId = record["agentId"] as? String,
+              let model = record["model"] as? String,
+              let timestamp = record["timestamp"] as? Date else {
+            return nil
+        }
+
+        let rawStatus = (record["status"] as? String) ?? Status.pending.rawValue
+        let status = Status(rawValue: rawStatus) ?? .pending
+        let processedAt = record["processedAt"] as? Date
+        let errorMessage = record["errorMessage"] as? String
+
+        return Payload(
+            requestID: requestID,
+            agentId: agentId,
+            model: model,
+            timestamp: timestamp,
+            status: status,
+            processedAt: processedAt,
+            errorMessage: errorMessage
+        )
     }
 }

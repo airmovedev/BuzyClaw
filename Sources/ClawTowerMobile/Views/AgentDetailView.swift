@@ -1,71 +1,19 @@
 import SwiftUI
-import CloudKit
 
 struct AgentDetailView: View {
-    let agent: AgentSnapshot
-    @State private var selectedModel: String
+    let agentId: String
+    let fallbackName: String
 
-    private let availableModels: [String]
+    @Environment(DashboardSnapshotStore.self) private var snapshotStore
 
-    init(agent: AgentSnapshot, currentSession: SessionSnapshot? = nil, availableModels: [String] = []) {
-        self.agent = agent
-
-        let savedOverride = UserDefaults.standard.string(forKey: "modelOverride-\(agent.id)")
-        let configuredModels = Self.sanitizedModels(availableModels)
-        let resolvedModel = Self.resolveSelectedModel(
-            sessionModel: currentSession?.model,
-            agentModel: agent.currentModel,
-            savedOverride: savedOverride,
-            configuredModels: configuredModels
-        )
-
-        self.availableModels = Self.buildAvailableModels(
-            configuredModels: configuredModels,
-            selectedModel: resolvedModel
-        )
-        _selectedModel = State(initialValue: resolvedModel)
+    init(agentId: String, fallbackName: String) {
+        self.agentId = agentId
+        self.fallbackName = fallbackName
     }
 
-    private static func resolveSelectedModel(
-        sessionModel: String?,
-        agentModel: String?,
-        savedOverride: String?,
-        configuredModels: [String]
-    ) -> String {
-        let candidates = [sessionModel, agentModel, savedOverride]
-            .compactMap { $0 }
-            .map(normalizeModelId)
-            .filter { !$0.isEmpty && $0 != "default" }
-
-        if let first = candidates.first {
-            return first
-        }
-
-        return configuredModels.first ?? "anthropic/claude-sonnet-4-20250514"
-    }
-
-    private static func buildAvailableModels(configuredModels: [String], selectedModel: String) -> [String] {
-        var result = sanitizedModels(configuredModels)
-        if !selectedModel.isEmpty && !result.contains(selectedModel) {
-            result.append(selectedModel)
-        }
-        return result
-    }
-
-    private static func sanitizedModels(_ models: [String]) -> [String] {
-        var result: [String] = []
-
-        for model in models.map(normalizeModelId) where !model.isEmpty && model != "default" {
-            if !result.contains(model) {
-                result.append(model)
-            }
-        }
-
-        return result
-    }
-
-    private static func normalizeModelId(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var agent: AgentSnapshot {
+        snapshotStore.agent(for: agentId)
+        ?? AgentSnapshot(id: agentId, displayName: fallbackName, emoji: nil, availableModels: snapshotStore.snapshot?.availableModels)
     }
 
     var body: some View {
@@ -93,38 +41,52 @@ struct AgentDetailView: View {
             }
 
             Section("AI 模型") {
-                Picker("模型", selection: $selectedModel) {
-                    ForEach(availableModels, id: \.self) { model in
-                        Text(model).tag(model)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(agent.resolvedWorkingModel ?? "未同步")
+                        .font(.body.weight(.medium))
+                        .textSelection(.enabled)
+
+                    let secondaryModelText = secondaryModelDescription
+                    if let secondaryModelText {
+                        Text(secondaryModelText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .pickerStyle(.inline)
-                .labelsHidden()
-                .onChange(of: selectedModel) { _, newValue in
-                    UserDefaults.standard.set(newValue, forKey: "modelOverride-\(agent.id)")
-                    Task {
-                        await sendModelChangeCommand(agentId: agent.id, model: newValue)
-                    }
-                }
+                .padding(.vertical, 2)
             }
         }
         .navigationTitle("Agent 详情")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            await snapshotStore.refresh()
+        }
     }
 
-    private func sendModelChangeCommand(agentId: String, model: String) async {
-        let container = CKContainer(identifier: CloudKitConstants.containerID)
-        let database = container.privateCloudDatabase
-        let recordID = CKRecord.ID(recordName: "ModelChange-\(agentId)", zoneID: CloudKitConstants.zoneID)
-        let record = CKRecord(recordType: "ModelChange", recordID: recordID)
-        record["agentId"] = agentId as CKRecordValue
-        record["model"] = model as CKRecordValue
-        record["timestamp"] = Date() as CKRecordValue
-        do {
-            _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
-            NSLog("[iOS] Sent model change command: agent=%@ model=%@", agentId, model)
-        } catch {
-            NSLog("[iOS] Failed to send model change: %@", error.localizedDescription)
+    private var secondaryModelDescription: String? {
+        let configuredModel = normalizedModel(agent.configuredModel)
+        let currentModel = normalizedModel(agent.resolvedWorkingModel)
+        let displayModel = normalizedModel(agent.currentDisplayModel)
+
+        if let configuredModel, configuredModel != currentModel {
+            return "配置模型：\(configuredModel)"
         }
+
+        if let displayModel, displayModel != currentModel {
+            return "展示模型：\(displayModel)"
+        }
+
+        return nil
+    }
+
+    private func normalizedModel(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              trimmed != "default"
+        else {
+            return nil
+        }
+
+        return trimmed
     }
 }

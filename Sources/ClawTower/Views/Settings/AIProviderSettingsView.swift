@@ -126,6 +126,18 @@ struct AIProviderSettingsView: View {
         }
         .padding(24)
         .animation(.easeInOut(duration: 0.2), value: selectedProvider)
+        .onChange(of: authService.isAuthenticated) { _, isAuthenticated in
+            if isAuthenticated {
+                // Config was written to openclaw.json — restart gateway so it picks up new provider/model.
+                // prepareForConfigChange() resets crash counters in case OpenClaw auto-restarted
+                // from detecting the file change before we explicitly restart.
+                appState.gatewayManager.prepareForConfigChange()
+                Task {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    await appState.restartGateway()
+                }
+            }
+        }
     }
 
     // MARK: - Provider Card

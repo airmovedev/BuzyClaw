@@ -140,6 +140,28 @@ struct SidebarView: View {
                 Task {
                     try? await appState.gatewayClient.deleteAgent(id: agent.id)
                     pendingDeleteAgent = nil
+
+                    agentSessions.removeValue(forKey: agent.id)
+                    activeSubagents.removeValue(forKey: agent.id)
+                    activeAgentIDs.remove(agent.id)
+                    expandedAgents.remove(agent.id)
+                    appState.markAgentAsRead(agent.id)
+                    appState.removeAgentLocally(agent.id)
+
+                    switch selectedNavigation {
+                    case .chat(let agentId) where agentId == agent.id,
+                         .chatSession(let agentId, _, _) where agentId == agent.id:
+                        if let mainAgent = appState.agents.first(where: { $0.id == "main" }) {
+                            selectedNavigation = .chat(agentId: mainAgent.id)
+                            appState.selectedAgent = mainAgent
+                        } else {
+                            selectedNavigation = nil
+                            appState.selectedAgent = appState.agents.first
+                        }
+                    default:
+                        break
+                    }
+
                     await appState.loadAgents()
                 }
             }

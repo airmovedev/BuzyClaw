@@ -1,5 +1,6 @@
 import CloudKit
 import Foundation
+import os.log
 
 /// Periodically writes a DashboardSnapshot to CloudKit for iOS consumption.
 /// macOS-only service — reads from Gateway API and local files.
@@ -8,6 +9,8 @@ import Foundation
 final class DashboardSyncService {
     var lastSyncedAt: Date?
     var syncError: String?
+
+    private let logger = Logger(subsystem: "com.clawtower.mac", category: "DashboardSyncService")
 
     private var timer: Timer?
     private let syncInterval: TimeInterval = 30
@@ -35,8 +38,20 @@ final class DashboardSyncService {
 
     private func sync() async {
         guard let appState else { return }
-        await checkModelChangeCommands()
-        let snapshot = await buildSnapshot(appState: appState)
+        let commandStatuses = await checkModelChangeCommands()
+
+        let previousSnapshot: DashboardSnapshot?
+        if let record = try? await database.record(for: DashboardSnapshotRecord.recordID) {
+            previousSnapshot = DashboardSnapshotRecord.from(record: record)
+        } else {
+            previousSnapshot = nil
+        }
+
+        let snapshot = await buildSnapshot(
+            appState: appState,
+            previousSnapshot: previousSnapshot,
+            commandStatuses: commandStatuses
+        )
         do {
             let record = try DashboardSnapshotRecord.toCKRecord(snapshot)
             _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
@@ -47,66 +62,140 @@ final class DashboardSyncService {
         }
     }
 
-    private func checkModelChangeCommands() async {
-        guard let appState else { return }
-        let zoneID = CloudKitConstants.zoneID
+    private func checkModelChangeCommands() async -> [String: AgentModelCommandStatus] {
+        guard let appState else { return [:] }
+        var statuses: [String: AgentModelCommandStatus] = [:]
+        var didApplyAny = false
 
         for agent in appState.agents {
-            let recordID = CKRecord.ID(recordName: "ModelChange-\(agent.id)", zoneID: zoneID)
+            let recordID = ModelChangeCommandRecord.recordID(agentId: agent.id)
             do {
                 let record = try await database.record(for: recordID)
-                guard let model = record["model"] as? String else { continue }
-                try? await appState.gatewayClient.updateAgentModel(agentId: agent.id, model: model)
-                _ = try? await database.modifyRecords(saving: [], deleting: [recordID], savePolicy: .allKeys)
-                NSLog("[macOS] Applied model change from iOS: agent=%@ model=%@", agent.id, model)
-                await appState.loadAgents()
+                guard var payload = ModelChangeCommandRecord.payload(from: record) else {
+                    logger.error("[ModelSwitch][DashboardSync] payload decode failed agent=\(agent.id, privacy: .public) recordName=\(recordID.recordName, privacy: .public)")
+                    continue
+                }
+
+                logger.log("[ModelSwitch][DashboardSync] scanned record agent=\(agent.id, privacy: .public) requestID=\(payload.requestID, privacy: .public) model=\(payload.model, privacy: .public) status=\(payload.status.rawValue, privacy: .public)")
+
+                if payload.status == .pending {
+                    logger.log("[ModelSwitch][DashboardSync] preparing updateAgentModel agent=\(agent.id, privacy: .public) requestID=\(payload.requestID, privacy: .public) model=\(payload.model, privacy: .public)")
+                    do {
+                        try await appState.gatewayClient.updateAgentModel(agentId: agent.id, model: payload.model)
+                        payload = ModelChangeCommandRecord.Payload(
+                            requestID: payload.requestID,
+                            agentId: payload.agentId,
+                            model: payload.model,
+                            timestamp: payload.timestamp,
+                            status: .applied,
+                            processedAt: Date(),
+                            errorMessage: nil
+                        )
+                        ModelChangeCommandRecord.apply(payload, to: record)
+                        _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
+                        logger.log("[ModelSwitch][DashboardSync] updateAgentModel success agent=\(agent.id, privacy: .public) requestID=\(payload.requestID, privacy: .public) model=\(payload.model, privacy: .public)")
+                        didApplyAny = true
+                    } catch {
+                        payload = ModelChangeCommandRecord.Payload(
+                            requestID: payload.requestID,
+                            agentId: payload.agentId,
+                            model: payload.model,
+                            timestamp: payload.timestamp,
+                            status: .failed,
+                            processedAt: Date(),
+                            errorMessage: error.localizedDescription
+                        )
+                        ModelChangeCommandRecord.apply(payload, to: record)
+                        _ = try? await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
+                        logger.error("[ModelSwitch][DashboardSync] updateAgentModel failed agent=\(agent.id, privacy: .public) requestID=\(payload.requestID, privacy: .public) model=\(payload.model, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                    }
+                }
+
+                statuses[agent.id] = payload.snapshotStatus
+            } catch let ckError as CKError where ckError.code == .unknownItem {
+                continue
             } catch {
-                // Record doesn't exist = no pending command, normal
+                logger.error("[ModelSwitch][DashboardSync] record scan failed agent=\(agent.id, privacy: .public) recordName=\(recordID.recordName, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                continue
             }
         }
+
+        if didApplyAny {
+            logger.log("[ModelSwitch][DashboardSync] refreshing agents after applied model change")
+            await appState.loadAgents()
+        }
+
+        return statuses
     }
 
-    private func buildSnapshot(appState: AppState) async -> DashboardSnapshot {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let configURL = home.appendingPathComponent(".openclaw/openclaw.json")
-        let config: [String: Any]? = {
-            guard let data = try? Data(contentsOf: configURL),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-            return json
-        }()
+    private func buildSnapshot(appState: AppState, previousSnapshot: DashboardSnapshot?, commandStatuses: [String: AgentModelCommandStatus]) async -> DashboardSnapshot {
+        let config = Self.loadConfig(basePath: appState.openclawBasePath)
+        let previousAgents = previousSnapshot?.agents ?? []
+        let previousAgentsByID = Dictionary(uniqueKeysWithValues: previousAgents.map { ($0.id, $0) })
+        let loadedModels = Self.loadAvailableModels(from: config)
+        let availableModels = loadedModels.isEmpty ? (previousSnapshot?.availableModels ?? []) : loadedModels
 
-        let agents = appState.agents.map { agent in
-            let (identityEmoji, identityName, creature, vibe) = Self.parseIdentity(agentId: agent.id, config: config)
+        let builtAgents = appState.agents.map { agent in
+            let previous = previousAgentsByID[agent.id]
+            let (identityEmoji, identityName, creature, vibe) = Self.parseIdentity(
+                agentId: agent.id,
+                config: config,
+                basePath: appState.openclawBasePath
+            )
+            let configuredModel = Self.agentConfiguredModel(agentId: agent.id, config: config) ?? previous?.configuredModel
+            let effectiveModel = Self.agentEffectiveModel(agentId: agent.id, config: config) ?? configuredModel ?? previous?.effectiveModel
+            let runtimeModel = Self.sanitizedModel(agent.model)
+            let currentDisplayModel = Self.preferredNonEmpty(
+                runtimeModel,
+                effectiveModel,
+                configuredModel,
+                previous?.currentDisplayModel,
+                previous?.currentModel
+            )
+            let resolvedIdentityEmoji = Self.preferredNonEmpty(identityEmoji, previous?.identityEmoji, agent.emoji)
+            let resolvedIdentityName = Self.preferredNonEmpty(identityName, previous?.identityName, agent.displayName)
+            let resolvedCreature = Self.preferredNonEmpty(creature, previous?.creature)
+            let resolvedVibe = Self.preferredNonEmpty(vibe, previous?.vibe)
+            let resolvedAvailableModels = Self.agentAvailableModels(agentId: agent.id, config: config, globalModels: availableModels)
+            let heartbeatModel = Self.agentHeartbeatModel(agentId: agent.id, config: config) ?? previous?.heartbeatModel
+
             return AgentSnapshot(
                 id: agent.id,
                 displayName: agent.displayName,
                 emoji: agent.emoji,
                 isOnline: agent.status == .online,
-                currentModel: agent.model,
+                currentModel: currentDisplayModel,
+                configuredModel: configuredModel,
+                effectiveModel: effectiveModel,
+                currentDisplayModel: currentDisplayModel,
+                availableModels: resolvedAvailableModels,
+                heartbeatModel: heartbeatModel,
                 tokenUsage: 0,
-                identityEmoji: identityEmoji ?? agent.emoji,
-                identityName: identityName ?? agent.displayName,
-                creature: creature,
-                vibe: vibe,
-                lastMessage: nil
+                identityEmoji: resolvedIdentityEmoji,
+                identityName: resolvedIdentityName,
+                creature: resolvedCreature,
+                vibe: resolvedVibe,
+                lastMessage: previous?.lastMessage,
+                latestModelCommand: commandStatuses[agent.id] ?? previous?.latestModelCommand
             )
         }
+
+        let agents = builtAgents.isEmpty ? previousAgents : builtAgents
 
         let tasks = Self.loadTasks(from: appState.tasksFilePath)
         let secondBrainDocs = Self.loadSecondBrainDocs(from: appState.secondBrainPath)
         let cronJobs = await loadCronJobs(client: appState.gatewayClient)
         let sessions = await loadSessions(client: appState.gatewayClient, agents: appState.agents)
-        let availableModels = AgentDraft.modelOptions
 
         return DashboardSnapshot(
             timestamp: Date(),
             agents: agents,
-            projects: [],
-            tasks: tasks,
-            cronJobs: cronJobs,
-            secondBrainDocs: secondBrainDocs,
-            sessions: sessions,
-            availableModels: availableModels
+            projects: previousSnapshot?.projects ?? [],
+            tasks: tasks.isEmpty ? (previousSnapshot?.tasks ?? []) : tasks,
+            cronJobs: (cronJobs.isEmpty ? previousSnapshot?.cronJobs : cronJobs),
+            secondBrainDocs: (secondBrainDocs.isEmpty ? previousSnapshot?.secondBrainDocs : secondBrainDocs),
+            sessions: (sessions.isEmpty ? previousSnapshot?.sessions : sessions),
+            availableModels: availableModels.isEmpty ? previousSnapshot?.availableModels : availableModels
         )
     }
 
@@ -169,6 +258,196 @@ final class DashboardSyncService {
         return results
     }
 
+    nonisolated private static func sanitizedModel(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized != "default" else { return nil }
+        return normalized
+    }
+
+    nonisolated private static func preferredNonEmpty(_ candidates: String?...) -> String? {
+        candidates.first { candidate in
+            guard let candidate else { return false }
+            return !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? nil
+    }
+
+    nonisolated private static func loadConfig(basePath: URL) -> [String: Any]? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let candidates = [
+            basePath.appendingPathComponent("openclaw.json"),
+            home.appendingPathComponent(".openclaw/openclaw.json")
+        ]
+
+        for url in candidates {
+            if let data = try? Data(contentsOf: url),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return json
+            }
+        }
+
+        return nil
+    }
+
+    nonisolated private static func configAgentList(from json: [String: Any]?) -> [[String: Any]] {
+        guard let json,
+              let agentsConfig = json["agents"] as? [String: Any],
+              let agentsList = agentsConfig["list"] as? [[String: Any]] else {
+            return []
+        }
+        return agentsList
+    }
+
+    nonisolated private static func configModelCount(from json: [String: Any]) -> Int {
+        var count = 0
+        if let agents = json["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let models = defaults["models"] as? [String: Any] {
+            count += models.count
+        }
+        if let models = json["models"] as? [String: Any],
+           let providers = models["providers"] as? [String: Any] {
+            for value in providers.values {
+                if let dict = value as? [String: Any] {
+                    count += (dict["models"] as? [[String: Any]])?.count ?? 0
+                    count += (dict["models"] as? [String])?.count ?? 0
+                }
+            }
+        }
+        return count
+    }
+
+
+    nonisolated private static func agentConfig(agentId: String, config: [String: Any]?) -> [String: Any]? {
+        configAgentList(from: config).first { ($0["id"] as? String) == agentId }
+    }
+
+    nonisolated private static func defaultPrimaryModel(from config: [String: Any]?) -> String? {
+        guard let agents = config?["agents"] as? [String: Any],
+              let defaults = agents["defaults"] as? [String: Any],
+              let modelConfig = defaults["model"] as? [String: Any] else { return nil }
+        return sanitizedModel(modelConfig["primary"] as? String)
+    }
+
+    nonisolated private static func agentConfiguredModel(agentId: String, config: [String: Any]?) -> String? {
+        if let agentConf = agentConfig(agentId: agentId, config: config) {
+            if let model = sanitizedModel(agentConf["model"] as? String) {
+                return model
+            }
+            if let modelConfig = agentConf["model"] as? [String: Any],
+               let primary = sanitizedModel(modelConfig["primary"] as? String) {
+                return primary
+            }
+        }
+        return nil
+    }
+
+    nonisolated private static func agentEffectiveModel(agentId: String, config: [String: Any]?) -> String? {
+        agentConfiguredModel(agentId: agentId, config: config) ?? defaultPrimaryModel(from: config)
+    }
+
+    nonisolated private static func agentHeartbeatModel(agentId: String, config: [String: Any]?) -> String? {
+        if let agentConf = agentConfig(agentId: agentId, config: config),
+           let heartbeat = agentConf["heartbeat"] as? [String: Any],
+           let model = sanitizedModel(heartbeat["model"] as? String) {
+            return model
+        }
+        if let agents = config?["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let heartbeat = defaults["heartbeat"] as? [String: Any],
+           let model = sanitizedModel(heartbeat["model"] as? String) {
+            return model
+        }
+        return nil
+    }
+
+    nonisolated private static func agentAvailableModels(agentId: String, config: [String: Any]?, globalModels: [String]) -> [String] {
+        var result: [String] = []
+
+        func append(_ model: String?) {
+            guard let model = sanitizedModel(model), !result.contains(model) else { return }
+            result.append(model)
+        }
+
+        if let agentConf = agentConfig(agentId: agentId, config: config) {
+            append(agentConf["model"] as? String)
+            if let modelConfig = agentConf["model"] as? [String: Any] {
+                append(modelConfig["primary"] as? String)
+                for fallback in (modelConfig["fallbacks"] as? [String] ?? []) {
+                    append(fallback)
+                }
+            }
+            if let models = agentConf["models"] as? [String: Any] {
+                for key in models.keys.sorted() {
+                    append(key)
+                }
+            }
+        }
+
+        if result.isEmpty {
+            for model in globalModels {
+                append(model)
+            }
+        } else {
+            for model in globalModels {
+                append(model)
+            }
+        }
+
+        return result
+    }
+
+    nonisolated private static func loadAvailableModels(from config: [String: Any]?) -> [String] {
+        guard let config else { return [] }
+
+        var result: [String] = []
+
+        func append(_ model: String?) {
+            guard let model = sanitizedModel(model), !result.contains(model) else { return }
+            result.append(model)
+        }
+
+        if let agents = config["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let modelConfig = defaults["model"] as? [String: Any] {
+            append(modelConfig["primary"] as? String)
+            for fallback in (modelConfig["fallbacks"] as? [String] ?? []) {
+                append(fallback)
+            }
+        }
+
+        if let agents = config["agents"] as? [String: Any],
+           let defaults = agents["defaults"] as? [String: Any],
+           let models = defaults["models"] as? [String: Any] {
+            for key in models.keys {
+                append(key)
+            }
+        }
+
+        if let models = config["models"] as? [String: Any],
+           let providers = models["providers"] as? [String: Any] {
+            for (providerId, providerValue) in providers {
+                guard let providerDict = providerValue as? [String: Any] else { continue }
+
+                if let modelEntries = providerDict["models"] as? [[String: Any]] {
+                    for entry in modelEntries {
+                        if let modelId = entry["id"] as? String {
+                            append("\(providerId)/\(modelId)")
+                        }
+                    }
+                }
+
+                if let modelIds = providerDict["models"] as? [String] {
+                    for modelId in modelIds {
+                        append("\(providerId)/\(modelId)")
+                    }
+                }
+            }
+        }
+
+        return result
+    }
+
     private func loadSessions(client: GatewayClient, agents: [Agent]) async -> [SessionSnapshot] {
         var all: [SessionSnapshot] = []
         for agent in agents {
@@ -195,24 +474,27 @@ final class DashboardSyncService {
         return all
     }
 
-    nonisolated private static func parseIdentity(agentId: String, config: [String: Any]?) -> (emoji: String?, name: String?, creature: String?, vibe: String?) {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let base = home.appendingPathComponent(".openclaw")
+    nonisolated private static func parseIdentity(agentId: String, config: [String: Any]?, basePath: URL) -> (emoji: String?, name: String?, creature: String?, vibe: String?) {
+        let workspaceCandidates: [String] = {
+            if agentId == "main" {
+                return [basePath.appendingPathComponent("workspace").path]
+            }
 
-        let workspacePath: String
-        if agentId == "main" {
-            workspacePath = base.appendingPathComponent("workspace").path
-        } else if let agentsConfig = config?["agents"] as? [String: Any],
-                  let list = agentsConfig["list"] as? [[String: Any]],
-                  let agentConf = list.first(where: { ($0["id"] as? String) == agentId }),
-                  let ws = agentConf["workspace"] as? String {
-            workspacePath = (ws as NSString).expandingTildeInPath
-        } else {
-            workspacePath = base.appendingPathComponent("workspace-\(agentId)").path
-        }
+            var candidates = [basePath.appendingPathComponent("agents/\(agentId)/workspace").path]
+            if let agentsConfig = config?["agents"] as? [String: Any],
+               let list = agentsConfig["list"] as? [[String: Any]],
+               let agentConf = list.first(where: { ($0["id"] as? String) == agentId }),
+               let ws = agentConf["workspace"] as? String {
+                candidates.insert((ws as NSString).expandingTildeInPath, at: 0)
+            }
+            candidates.append(basePath.appendingPathComponent("workspace-\(agentId)").path)
+            return candidates
+        }()
 
-        let identityPath = (workspacePath as NSString).appendingPathComponent("IDENTITY.md")
-        guard let content = try? String(contentsOfFile: identityPath, encoding: .utf8) else { return (nil, nil, nil, nil) }
+        let content: String? = workspaceCandidates.lazy.compactMap { workspacePath in
+            try? String(contentsOfFile: (workspacePath as NSString).appendingPathComponent("IDENTITY.md"), encoding: .utf8)
+        }.first
+        guard let content else { return (nil, nil, nil, nil) }
 
         var emoji: String?, name: String?, creature: String?, vibe: String?
         for line in content.components(separatedBy: .newlines) {

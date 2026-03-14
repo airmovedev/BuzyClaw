@@ -160,15 +160,7 @@ final class TaskManager {
     }
 
     static func resolveTasksFileURL() -> URL {
-        let base: URL
-        let mode = UserDefaults.standard.string(forKey: "gatewayMode")
-        if mode == "freshInstall" {
-            let userHome = FileManager.default.homeDirectoryForCurrentUser
-            base = userHome.appendingPathComponent("Library/Application Support/ClawTower", isDirectory: true)
-        } else {
-            base = FileManager.default.homeDirectoryForCurrentUser
-        }
-        return base
+        FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".openclaw", isDirectory: true)
             .appendingPathComponent("tasks.json", isDirectory: false)
     }

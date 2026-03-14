@@ -1,4 +1,5 @@
 import Foundation
+import os.log
 
 struct ModelUsageInfo: Sendable, Codable {
     var isAvailable: Bool = false
@@ -37,6 +38,7 @@ final class GatewayClient: Sendable {
     private(set) var baseURL: URL
     private(set) var authToken: String?
     private(set) var rateLimitInfo: RateLimitInfo?
+    private let logger = Logger(subsystem: "com.clawtower.mac", category: "GatewayClient")
 
     init(baseURL: URL) {
         self.baseURL = baseURL
@@ -119,21 +121,34 @@ final class GatewayClient: Sendable {
     // MARK: - Agents
 
     func listAgents() async throws -> [Agent] {
-        let json = try await toolsInvoke(tool: "agents_list")
-        let result = json["result"] as? [String: Any] ?? json
-        let details = result["details"] as? [String: Any] ?? result
-        var runtimeAgents = details["agents"] as? [[String: Any]]
-            ?? result["agents"] as? [[String: Any]]
-            ?? []
+        // Try Gateway API first; fall back to openclaw.json on failure
+        var runtimeAgents: [[String: Any]] = []
+        var gatewayAvailable = false
+
+        if let json = try? await toolsInvoke(tool: "agents_list") {
+            let result = json["result"] as? [String: Any] ?? json
+            let details = result["details"] as? [String: Any] ?? result
+            runtimeAgents = details["agents"] as? [[String: Any]]
+                ?? result["agents"] as? [[String: Any]]
+                ?? []
+            gatewayAvailable = true
+        }
 
         let configForWorkspace = Self.loadPreferredConfig()
         let configAgents = Self.configAgentList(from: configForWorkspace)
         let home = FileManager.default.homeDirectoryForCurrentUser
 
-        let runtimeIDs = Set(runtimeAgents.compactMap { ($0["id"] as? String)?.lowercased() })
-        for configAgent in configAgents {
-            guard let id = configAgent["id"] as? String, !runtimeIDs.contains(id.lowercased()) else { continue }
-            runtimeAgents.append(configAgent)
+        if gatewayAvailable {
+            // Merge: add config agents not already returned by runtime
+            let runtimeIDs = Set(runtimeAgents.compactMap { ($0["id"] as? String)?.lowercased() })
+            for configAgent in configAgents {
+                guard let id = configAgent["id"] as? String, !runtimeIDs.contains(id.lowercased()) else { continue }
+                runtimeAgents.append(configAgent)
+            }
+        } else {
+            // Gateway unreachable — use config as sole source
+            NSLog("[GatewayClient] Gateway API unreachable, using openclaw.json agents.list as fallback (\(configAgents.count) agents)")
+            runtimeAgents = configAgents
         }
 
         var identityMap: [String: (name: String?, emoji: String?)] = [:]
@@ -147,14 +162,16 @@ final class GatewayClient: Sendable {
             }
         }
 
-        let defaultModel: String = {
+        let defaultModel: String? = {
             if let agentsConfig = configForWorkspace?["agents"] as? [String: Any],
                let defaults = agentsConfig["defaults"] as? [String: Any],
                let modelConfig = defaults["model"] as? [String: Any],
-               let primary = modelConfig["primary"] as? String {
+               let primary = modelConfig["primary"] as? String,
+               !primary.isEmpty,
+               primary != "default" {
                 return primary
             }
-            return "anthropic/claude-sonnet-4-20250514"
+            return nil
         }()
 
         return runtimeAgents.map { dict in
@@ -178,7 +195,12 @@ final class GatewayClient: Sendable {
                     return nil
                 }()
 
-                let workspacePath = agentWorkspace ?? home.appendingPathComponent(".openclaw/workspace").path
+                let workspacePath = agentWorkspace ?? {
+                    if id.lowercased() == "main" {
+                        return home.appendingPathComponent(".openclaw/workspace").path
+                    }
+                    return home.appendingPathComponent(".openclaw/agents/\(id)/workspace").path
+                }()
                 let identityPath = (workspacePath as NSString).appendingPathComponent("IDENTITY.md")
                 if let identityContent = try? String(contentsOfFile: identityPath, encoding: .utf8) {
                     if displayName == id {
@@ -198,7 +220,7 @@ final class GatewayClient: Sendable {
                 }
             }
 
-            let agentModel: String = {
+            let agentModel: String? = {
                 if let m = dict["model"] as? String, !m.isEmpty, m != "default" { return m }
                 if let agentsConfig = configForWorkspace?["agents"] as? [String: Any],
                    let agentsList = agentsConfig["list"] as? [[String: Any]],
@@ -503,7 +525,10 @@ final class GatewayClient: Sendable {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw GatewayError.badResponse
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            NSLog("[GatewayClient] cronListRaw failed: HTTP \(statusCode), body: \(bodyText.prefix(500))")
+            throw GatewayError.httpError(statusCode: statusCode, detail: bodyText.prefix(300).description)
         }
         return data
     }
@@ -1200,43 +1225,56 @@ final class GatewayClient: Sendable {
     // MARK: - Config File Update
 
     func updateAgentModel(agentId: String, model: String) async throws {
-        guard let url = Self.preferredConfigURL(),
-              let data = try? Data(contentsOf: url),
-              var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              var agents = json["agents"] as? [String: Any],
-              var list = agents["list"] as? [[String: Any]] else {
+        guard let url = Self.preferredConfigURL() else {
+            logger.error("[ModelSwitch][GatewayClient] updateAgentModel missing configURL agent=\(agentId, privacy: .public) model=\(model, privacy: .public)")
             throw GatewayError.badResponse
         }
 
-        if let idx = list.firstIndex(where: { ($0["id"] as? String) == agentId }) {
-            list[idx]["model"] = model
-            agents["list"] = list
-            json["agents"] = agents
-            let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        logger.log("[ModelSwitch][GatewayClient] updateAgentModel start agent=\(agentId, privacy: .public) model=\(model, privacy: .public) configPath=\(url.path, privacy: .public)")
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            logger.error("[ModelSwitch][GatewayClient] updateAgentModel read config failed agent=\(agentId, privacy: .public) configPath=\(url.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var agents = json["agents"] as? [String: Any],
+              var list = agents["list"] as? [[String: Any]] else {
+            logger.error("[ModelSwitch][GatewayClient] updateAgentModel parse config failed agent=\(agentId, privacy: .public) configPath=\(url.path, privacy: .public)")
+            throw GatewayError.badResponse
+        }
+
+        guard let idx = list.firstIndex(where: { ($0["id"] as? String) == agentId }) else {
+            logger.error("[ModelSwitch][GatewayClient] updateAgentModel agent not found agent=\(agentId, privacy: .public) model=\(model, privacy: .public) configPath=\(url.path, privacy: .public)")
+            throw GatewayError.httpError(statusCode: 404, detail: "Agent \(agentId) not found in openclaw.json")
+        }
+
+        let oldModel = (list[idx]["model"] as? String) ?? "<nil>"
+        list[idx]["model"] = model
+        let newModel = (list[idx]["model"] as? String) ?? "<nil>"
+        logger.log("[ModelSwitch][GatewayClient] updateAgentModel mutate agent=\(agentId, privacy: .public) oldModel=\(oldModel, privacy: .public) newModel=\(newModel, privacy: .public)")
+
+        agents["list"] = list
+        json["agents"] = agents
+        let newData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+
+        do {
             try newData.write(to: url)
-            NSLog("[ClawTower] Updated model for agent %@ to %@", agentId, model)
+            logger.log("[ModelSwitch][GatewayClient] updateAgentModel write success agent=\(agentId, privacy: .public) model=\(newModel, privacy: .public) configPath=\(url.path, privacy: .public)")
+        } catch {
+            logger.error("[ModelSwitch][GatewayClient] updateAgentModel write failed agent=\(agentId, privacy: .public) model=\(newModel, privacy: .public) configPath=\(url.path, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            throw error
         }
     }
 
     private static func preferredConfigURL() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let candidates = [
-            home.appendingPathComponent("Library/Application Support/ClawTower/.openclaw/openclaw.json"),
-            home.appendingPathComponent(".openclaw/openclaw.json")
-        ]
-
-        var bestURL: URL?
-        var bestScore = -1
-        for url in candidates {
-            guard let data = try? Data(contentsOf: url),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            let score = configAgentList(from: json).count * 100 + configModelCount(from: json)
-            if score > bestScore {
-                bestScore = score
-                bestURL = url
-            }
-        }
-        return bestURL
+        let url = home.appendingPathComponent(".openclaw/openclaw.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return url
     }
 
     private static func loadPreferredConfig() -> [String: Any]? {

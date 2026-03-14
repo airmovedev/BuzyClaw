@@ -23,6 +23,8 @@ targets:
       - path: Resources
         type: folder
         buildPhase: resources
+      - path: SupportFiles/Localization
+        buildPhase: resources
     resources:
       - path: Sources/ClawTower/Resources/Assets.xcassets
     info:
@@ -38,18 +40,12 @@ targets:
           - CloudKit
         com.apple.developer.icloud-container-identifiers:
           - iCloud.com.clawtower.app
+        com.apple.developer.icloud-container-environment: Production
         com.apple.security.network.client: true
     preBuildScripts:
       - name: Prepare OpenClaw Runtime
         script: |
-          if [ "$CONFIGURATION" = "Release" ] \
-            || [ ! -f "$SRCROOT/Resources/runtime/openclaw/docs/reference/templates/AGENTS.md" ] \
-            || [ ! -f "$SRCROOT/Resources/runtime/openclaw.version" ] \
-            || [ "$(cat "$SRCROOT/Resources/runtime/openclaw.version" 2>/dev/null)" != "2026.3.12" ]; then
-            "$SRCROOT/Scripts/prepare-runtime.sh"
-          else
-            echo "⏭ Runtime looks complete and pinned at 2026.3.2, skipping sync"
-          fi
+          "$SRCROOT/Scripts/prepare-runtime.sh"
         basedOnDependencyAnalysis: false
     settings:
       base:
@@ -75,6 +71,8 @@ targets:
         type: file
       - path: Sources/ClawTower/Models/CronJob.swift
         type: file
+      - path: SupportFiles/Localization
+        buildPhase: resources
     resources:
       - path: Sources/ClawTowerMobile/Resources/Assets.xcassets
     settings:
@@ -84,7 +82,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: SupportFiles/ClawTowerMobile.entitlements
         PRODUCT_NAME: ClawTowerMobile
         MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "6"
+        CURRENT_PROJECT_VERSION: "11"
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_IDENTITY: "Apple Development"
         CODE_SIGNING_REQUIRED: true
@@ -94,6 +92,8 @@ targets:
         ENABLE_PREVIEWS: true
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
         TARGETED_DEVICE_FAMILY: "1,2"
+    dependencies:
+      - package: MarkdownUI
 
 schemes:
   ClawTower:

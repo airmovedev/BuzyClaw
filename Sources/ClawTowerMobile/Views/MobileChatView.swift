@@ -7,14 +7,11 @@ struct MobileChatView: View {
     let agentName: String
 
     @Environment(CloudKitMessageClient.self) private var messageClient
+    @Environment(DashboardSnapshotStore.self) private var snapshotStore
     @State private var inputText = ""
     @State private var isSending = false
     @State private var showSessionPicker = false
     @FocusState private var isInputFocused: Bool
-    @State private var showAgentDetail = false
-    @State private var agentSnapshot: AgentSnapshot?
-    @State private var currentSessionSnapshot: SessionSnapshot?
-    @State private var availableModels: [String] = []
     @State private var pendingImageData: Data?
     @State private var pendingImagePreview: UIImage?
     @State private var selectedPhotoItem: PhotosPickerItem?
@@ -53,11 +50,7 @@ struct MobileChatView: View {
                     }
 
                     NavigationLink {
-                        AgentDetailView(
-                            agent: agentSnapshot ?? AgentSnapshot(id: agentId, displayName: agentName, emoji: nil),
-                            currentSession: currentSessionSnapshot,
-                            availableModels: availableModels
-                        )
+                        AgentDetailView(agentId: agentId, fallbackName: agentName)
                     } label: {
                         Image(systemName: "info.circle")
                     }
@@ -72,7 +65,7 @@ struct MobileChatView: View {
         }
         .task {
             messageClient.selectAgent(agentId)
-            await fetchAgentSnapshot()
+            await snapshotStore.refresh()
         }
     }
 
@@ -276,22 +269,6 @@ struct MobileChatView: View {
         return jpegData
     }
 
-    // MARK: - Fetch Agent Snapshot
-
-    private func fetchAgentSnapshot() async {
-        let database = CKContainer(identifier: CloudKitConstants.containerID).privateCloudDatabase
-        do {
-            let record = try await database.record(for: DashboardSnapshotRecord.recordID)
-            if let snap = DashboardSnapshotRecord.from(record: record) {
-                agentSnapshot = snap.agents.first { $0.id == agentId }
-                currentSessionSnapshot = snap.sessions?.first { $0.id == messageClient.currentSessionKey }
-                availableModels = snap.availableModels ?? []
-            }
-        } catch {
-            // Silently fail
-        }
-    }
-
     // MARK: - Sync Status
 
     private var syncStatusView: some View {
@@ -316,11 +293,10 @@ struct SessionPickerView: View {
     let agentId: String
     let agentName: String
     @Environment(CloudKitMessageClient.self) private var messageClient
+    @Environment(DashboardSnapshotStore.self) private var snapshotStore
     @Environment(\.dismiss) private var dismiss
     @State private var sessions: [SessionSnapshot] = []
     @State private var isLoading = false
-
-    private let database = CKContainer(identifier: CloudKitConstants.containerID).privateCloudDatabase
 
     var body: some View {
         List {
@@ -435,15 +411,8 @@ struct SessionPickerView: View {
         isLoading = true
         defer { isLoading = false }
 
-        do {
-            let record = try await database.record(for: DashboardSnapshotRecord.recordID)
-            if let snap = DashboardSnapshotRecord.from(record: record) {
-                self.sessions = (snap.sessions ?? []).filter { $0.agentId == agentId }
-            }
-        } catch {
-            // Silently fail — main session is always available
-            sessions = []
-        }
+        await snapshotStore.refresh()
+        sessions = (snapshotStore.snapshot?.sessions ?? []).filter { $0.agentId == agentId }
     }
 
     private func formatTokens(_ n: Int) -> String {
@@ -458,6 +427,8 @@ struct SessionPickerView: View {
 struct MobileMessageBubble: View {
     let message: MessageRecord
     var shouldTruncate: Bool = true
+
+    @Environment(CloudKitMessageClient.self) private var messageClient
 
     private var isUser: Bool { message.direction == .toGateway }
     @State private var isExpanded = false
@@ -555,7 +526,7 @@ struct MobileMessageBubble: View {
     private var messageStatusView: some View {
         if isUser {
             HStack(spacing: 4) {
-                switch message.status {
+                switch messageClient.frontendStatus(for: message) {
                 case .pending:
                     ProgressView()
                         .controlSize(.mini)

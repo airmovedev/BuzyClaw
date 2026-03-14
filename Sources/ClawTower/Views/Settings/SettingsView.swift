@@ -151,14 +151,29 @@ struct SettingsView: View {
                             }
 
                             if appState.gatewayManager.isRunning {
-                                HStack(spacing: 16) {
-                                    Label("端口: \(appState.gatewayManager.port)", systemImage: "network")
-                                    if let pid = appState.gatewayManager.pid {
-                                        Label("PID: \(pid)", systemImage: "gearshape")
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(spacing: 16) {
+                                        Label("端口: \(appState.gatewayManager.port)", systemImage: "network")
+                                        if let pid = appState.gatewayManager.pid {
+                                            Label("PID: \(pid)", systemImage: "gearshape")
+                                        }
+                                        Spacer()
+                                        Button {
+                                            let token = appState.gatewayManager.authToken
+                                            let port = appState.gatewayManager.port
+                                            let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? token
+                                            if let url = URL(string: "http://127.0.0.1:\(port)/#token=\(encoded)") {
+                                                NSWorkspace.shared.open(url)
+                                            }
+                                        } label: {
+                                            Label("打开网页管理", systemImage: "safari")
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
                                     }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                                 }
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                             }
                         }
                         .padding(8)
@@ -244,9 +259,9 @@ struct SettingsView: View {
 
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack {
-                                    Text("Session Visibility")
+                                    Text("多Agent会话访问权限")
                                     Spacer()
-                                    Picker("Session Visibility", selection: $currentSessionVisibility) {
+                                    Picker("多Agent会话访问权限", selection: $currentSessionVisibility) {
                                         Text("tree").tag(SessionVisibility.tree)
                                         Text("self").tag(SessionVisibility.selfOnly)
                                         Text("agent").tag(SessionVisibility.agent)
@@ -326,6 +341,40 @@ struct SettingsView: View {
                             Text("登录时自动启动 ClawTower，保持 Gateway 常驻运行")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("关于虾忙")
+                            .font(.headline)
+                        Spacer()
+                    }
+
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("虾忙")
+                                    .font(.title3.weight(.semibold))
+                                Text("版本 \(appVersionText)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text("虾忙基于 OpenClaw 开源项目开发。")
+                                .font(.callout)
+
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("开源说明")
+                                    .font(.subheadline.weight(.medium))
+                                Text(openClawAttributionText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -484,15 +533,20 @@ struct SettingsView: View {
             }
         }
 
-        // 也读取 primary model
+        // 也读取 primary model 和 fallbacks
         if let json = configJson,
            let agents = json["agents"] as? [String: Any],
            let defaults = agents["defaults"] as? [String: Any],
-           let model = defaults["model"] as? [String: Any],
-           let primary = model["primary"] as? String {
-            if !modelIds.contains(primary) {
+           let model = defaults["model"] as? [String: Any] {
+            if let primary = model["primary"] as? String, !modelIds.contains(primary) {
                 modelIds.insert(primary)
                 models.append(DetectedModel(fullId: primary))
+            }
+            if let fallbacks = model["fallbacks"] as? [String] {
+                for fb in fallbacks where !modelIds.contains(fb) {
+                    modelIds.insert(fb)
+                    models.append(DetectedModel(fullId: fb))
+                }
             }
         }
 
@@ -507,6 +561,26 @@ struct SettingsView: View {
         case "full": return "全部工具开放（文件、终端、浏览器、消息等）"
         default: return ""
         }
+    }
+
+    private var appVersionText: String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        switch (shortVersion, buildVersion) {
+        case let (short?, build?) where !short.isEmpty && !build.isEmpty:
+            return "\(short) (\(build))"
+        case let (short?, _):
+            return short
+        case let (_, build?) where !build.isEmpty:
+            return build
+        default:
+            return "未知版本"
+        }
+    }
+
+    private var openClawAttributionText: String {
+        "OpenClaw 随应用一同提供，相关许可证文件位于应用资源中的 openclaw/LICENSE。当前仓库内该文件标明 OpenClaw 使用 MIT License，并包含版权声明：Copyright (c) 2025 Peter Steinberger。根据该文件要求，相关版权与许可声明应随软件副本或其重要部分一同提供。"
     }
 
     private func loadToolsProfile() {

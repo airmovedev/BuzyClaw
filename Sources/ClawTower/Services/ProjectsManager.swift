@@ -186,26 +186,14 @@ final class ProjectsManager {
 
     static func resolveInitialRootURL() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        let preferred = home
-            .appendingPathComponent("Library/Application Support/ClawTower/.openclaw", isDirectory: true)
-            .appendingPathComponent("Projects", isDirectory: true)
-        let legacy = home
+        let projectsDir = home
             .appendingPathComponent(".openclaw", isDirectory: true)
             .appendingPathComponent("Projects", isDirectory: true)
 
         if let saved = UserDefaults.standard.string(forKey: "projectsRootDirectoryPath"), !saved.isEmpty {
-            let savedURL = URL(fileURLWithPath: saved, isDirectory: true)
-            if savedURL.standardizedFileURL == legacy.standardizedFileURL,
-               FileManager.default.fileExists(atPath: preferred.path) || UserDefaults.standard.string(forKey: "gatewayMode") == "freshInstall" {
-                return preferred
-            }
-            return savedURL
+            return URL(fileURLWithPath: saved, isDirectory: true)
         }
 
-        if FileManager.default.fileExists(atPath: preferred.path) || UserDefaults.standard.string(forKey: "gatewayMode") == "freshInstall" {
-            return preferred
-        }
-
-        return legacy
+        return projectsDir
     }
 }
