@@ -45,7 +45,7 @@ targets:
           if [ "$CONFIGURATION" = "Release" ] \
             || [ ! -f "$SRCROOT/Resources/runtime/openclaw/docs/reference/templates/AGENTS.md" ] \
             || [ ! -f "$SRCROOT/Resources/runtime/openclaw.version" ] \
-            || [ "$(cat "$SRCROOT/Resources/runtime/openclaw.version" 2>/dev/null)" != "2026.3.2" ]; then
+            || [ "$(cat "$SRCROOT/Resources/runtime/openclaw.version" 2>/dev/null)" != "2026.3.12" ]; then
             "$SRCROOT/Scripts/prepare-runtime.sh"
           else
             echo "⏭ Runtime looks complete and pinned at 2026.3.2, skipping sync"

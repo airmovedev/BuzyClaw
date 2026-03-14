@@ -12,9 +12,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RUNTIME_DIR="$PROJECT_DIR/Resources/runtime"
-PINNED_OPENCLAW_VERSION="2026.3.2"
+PINNED_OPENCLAW_VERSION="2026.3.12"
 
-SOURCE="${1:-/usr/local/lib/node_modules/openclaw}"
+# Accept explicit path, or auto-detect from npm global prefix
+if [ -n "${1:-}" ]; then
+    SOURCE="$1"
+elif command -v npm &>/dev/null; then
+    SOURCE="$(npm root -g)/openclaw"
+else
+    SOURCE="/usr/local/lib/node_modules/openclaw"
+fi
 
 if [ ! -d "$SOURCE" ]; then
     echo "❌ OpenClaw not found at $SOURCE"

@@ -13,6 +13,8 @@ final class GatewayManager {
         case stopped
         case starting
         case running
+        case reconnecting
+        case disconnected
         case error(String)
     }
 
@@ -25,12 +27,16 @@ final class GatewayManager {
     private(set) var pid: Int32? = nil
 
     var isRunning: Bool { state == .running }
+    var isReconnecting: Bool { state == .reconnecting }
+    var isConnectionWarning: Bool { state == .reconnecting || state == .disconnected }
 
     var statusText: String {
         switch state {
         case .stopped: return "已停止"
         case .starting: return "启动中..."
         case .running: return "运行中 (端口 \(port))"
+        case .reconnecting: return "重连中..."
+        case .disconnected: return "已断开"
         case .error(let msg): return "错误: \(msg)"
         }
     }
