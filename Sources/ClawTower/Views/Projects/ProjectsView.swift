@@ -58,6 +58,7 @@ struct ProjectsView: View {
 // MARK: - Project Card
 
 private struct ProjectCardRow: View {
+    @Environment(\.themeColor) private var themeColor
     let project: ProjectItem
 
     private var subdirLabels: [(String, String)] {
@@ -72,7 +73,7 @@ private struct ProjectCardRow: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Image(systemName: "folder.fill")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(themeColor)
                 Text(project.name)
                     .font(.headline)
                     .lineLimit(1)
@@ -248,6 +249,7 @@ private struct ProjectProgressSection: View {
 // MARK: - Related Docs Section
 
 private struct ProjectDocsSection: View {
+    @Environment(\.themeColor) private var themeColor
     let docs: [ProjectFileItem]
     let manager: ProjectsManager
 
@@ -263,7 +265,7 @@ private struct ProjectDocsSection: View {
                     } label: {
                         HStack(spacing: 8) {
                             Image(systemName: "doc.text")
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(themeColor)
                             Text(doc.name)
                                 .lineLimit(1)
                             Spacer()
@@ -288,6 +290,7 @@ private struct ProjectDocsSection: View {
 // MARK: - Recent Activity Section
 
 private struct ProjectRecentSection: View {
+    @Environment(\.themeColor) private var themeColor
     let files: [ProjectFileItem]
 
     var body: some View {
@@ -299,7 +302,7 @@ private struct ProjectRecentSection: View {
                 ForEach(files) { file in
                     HStack(spacing: 8) {
                         Image(systemName: file.isMarkdown ? "doc.text" : "doc")
-                            .foregroundStyle(file.isMarkdown ? .blue : .secondary)
+                            .foregroundStyle(file.isMarkdown ? themeColor : .secondary)
                             .frame(width: 20)
                         Text(file.name)
                             .lineLimit(1)

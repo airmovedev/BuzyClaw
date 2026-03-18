@@ -53,6 +53,9 @@ final class GatewayManager {
         return false
     }
 
+    /// Called after a crash-restart when the port or token may have changed.
+    var onConnectionInfoChanged: ((Int, String) -> Void)?
+
     // MARK: - Private
 
     private var process: Process?
@@ -91,7 +94,7 @@ final class GatewayManager {
         let existingPort = 18789
         let existingToken = GatewayClient.readAuthToken()
 
-        let url = URL(string: "http://localhost:\(existingPort)/health")!
+        let url = URL(string: "http://127.0.0.1:\(existingPort)/health")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 3
         if let token = existingToken {
@@ -135,9 +138,11 @@ final class GatewayManager {
     }
 
     func restartGateway() async {
-        if mode == .existingInstall {
-            // Send restart signal to existing gateway via API
-            let url = URL(string: "http://localhost:\(port)/api/gateway/restart")!
+        // If the gateway is already running on a known port, send an API restart
+        // command instead of killing the process and relaunching. This avoids
+        // unnecessary port reallocation for freshInstall mode.
+        if port > 0, !authToken.isEmpty, state == .running || state == .starting {
+            let url = URL(string: "http://127.0.0.1:\(port)/api/gateway/restart")!
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
@@ -149,12 +154,29 @@ final class GatewayManager {
             state = .starting
             try? await Task.sleep(for: .seconds(3))
 
-            // Reconnect
-            if await tryConnectExisting() {
+            // Reconnect using health check on the same port
+            let healthURL = URL(string: "http://127.0.0.1:\(port)/health")!
+            var healthReq = URLRequest(url: healthURL)
+            healthReq.timeoutInterval = 3
+            healthReq.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
+
+            if let (_, response) = try? await URLSession.shared.data(for: healthReq),
+               let http = response as? HTTPURLResponse, (200..<400).contains(http.statusCode) {
+                state = .running
+                connectionLostAt = nil
+                startHealthCheck()
                 return
             }
-            state = .error("Gateway 重启后无法重新连接")
-        } else {
+
+            // For existingInstall, report error; for freshInstall, fall through to full relaunch
+            if mode == .existingInstall {
+                state = .error("Gateway 重启后无法重新连接")
+                return
+            }
+        }
+
+        // Full relaunch — only for freshInstall when API restart failed or gateway wasn't running
+        if mode == .freshInstall {
             stopGateway()
             try? await Task.sleep(for: .milliseconds(500))
             restartCount = 0
@@ -352,13 +374,13 @@ final class GatewayManager {
         state = .starting
         startingAt = Date()
 
-        // Reuse saved port if available and free; otherwise allocate a new one
+        // Port strategy: prefer saved port, then scan sequentially from defaultPort (18790)
         let resolvedPort: Int
         if let savedPort = UserDefaults.standard.object(forKey: "gateway.port") as? Int,
            savedPort > 0, Self.isPortAvailable(savedPort) {
             resolvedPort = savedPort
         } else {
-            resolvedPort = Self.findFreePort()
+            resolvedPort = Self.findFreePortSequential()
         }
         guard resolvedPort > 0 else {
             state = .error("无法分配可用端口")
@@ -419,6 +441,11 @@ final class GatewayManager {
         let configFile = configDir.appendingPathComponent("openclaw.json")
         Self.upsertGatewayConfig(at: configFile, authToken: authToken, port: port)
         print("[Gateway] Ensured gateway config at \(configFile.path)")
+
+        // Re-ensure the stored API key is present in auth-profiles.json.
+        // The Gateway runtime may overwrite auth-profiles.json (e.g. to update usageStats),
+        // which can drop the API key entry. Re-persisting on every launch prevents this.
+        AuthService.ensureAuthProfilesUpToDate(homeDir: homeDir)
 
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
@@ -504,6 +531,8 @@ final class GatewayManager {
             state = .running
             connectionLostAt = nil
             restartCount = 0
+            // Notify observer (e.g. AppState) so GatewayClient stays in sync after crash-restart
+            onConnectionInfoChanged?(port, authToken)
         }
 
         // Start periodic health check loop (handles ongoing monitoring + crash recovery)
@@ -591,7 +620,7 @@ final class GatewayManager {
     }
 
     private func checkHealth() async {
-        let url = URL(string: "http://localhost:\(port)/health")!
+        let url = URL(string: "http://127.0.0.1:\(port)/health")!
         var request = URLRequest(url: url)
         request.timeoutInterval = 1.5
         request.setValue("Bearer \(authToken)", forHTTPHeaderField: "Authorization")
@@ -638,10 +667,18 @@ final class GatewayManager {
     // MARK: - Port Allocation
 
     /// Check whether a specific port is available for binding on loopback.
+    /// Uses SO_REUSEADDR so that ports in TIME_WAIT state (from a recently
+    /// terminated process) are correctly reported as available.
     private static func isPortAvailable(_ port: Int) -> Bool {
         let sock = socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else { return false }
         defer { close(sock) }
+
+        // Allow rebinding ports in TIME_WAIT state. Without this, a port freed
+        // by a just-terminated Gateway process stays "unavailable" for ~60s,
+        // causing the port number to increment on every restart.
+        var reuse: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
@@ -656,32 +693,18 @@ final class GatewayManager {
         return result == 0
     }
 
-    private static func findFreePort() -> Int {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return 0 }
-        defer { close(sock) }
+    /// Default port for BuzyClaw's own gateway (one above OpenClaw CLI's default 18789).
+    private static let defaultPort = 18790
 
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = 0 // Let OS pick
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-
-        let bindResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.bind(sock, sockPtr, addrLen)
+    /// Scans sequentially from `defaultPort` until a free port is found.
+    /// Tries up to 20 ports (18790–18809) to keep the range predictable.
+    private static func findFreePortSequential() -> Int {
+        for candidate in defaultPort ..< (defaultPort + 20) {
+            if isPortAvailable(candidate) {
+                return candidate
             }
         }
-        guard bindResult == 0 else { return 0 }
-
-        let getsockResult = withUnsafeMutablePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                getsockname(sock, sockPtr, &addrLen)
-            }
-        }
-        guard getsockResult == 0 else { return 0 }
-
-        return Int(UInt16(bigEndian: addr.sin_port))
+        return 0
     }
 
     // MARK: - Helpers

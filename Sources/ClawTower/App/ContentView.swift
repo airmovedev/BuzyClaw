@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var showActivityFeed = true
     @State private var showAgentDetail = false
     @State private var chatViewGeneration: Int = 0
+    @State private var showQuotaAlert = false
+    private let themeManager = ThemeManager.shared
     var appDelegate: AppDelegate
 
     var body: some View {
@@ -17,6 +19,9 @@ struct ContentView: View {
                 OnboardingView(appState: appState)
             }
         }
+        .environment(\.themeColor, themeManager.themeColor)
+        .tint(themeManager.themeColor)
+        .accentColor(themeManager.themeColor)
         .task {
             // Wire up delegate so it can stop gateway on quit
             appDelegate.appState = appState
@@ -81,6 +86,17 @@ struct ContentView: View {
                 })
             }
         }
+        .alert("iCloud 空间不足", isPresented: $showQuotaAlert) {
+            Button("好的", role: .cancel) {}
+        } message: {
+            Text("iCloud 存储空间已满，无法与 iOS 端同步数据。请前往系统设置清理或扩容 iCloud 空间。")
+        }
+        .onChange(of: appState.cloudKitRelay?.isQuotaExceeded) { _, exceeded in
+            if exceeded == true { showQuotaAlert = true }
+        }
+        .onChange(of: appState.dashboardSync?.isQuotaExceeded) { _, exceeded in
+            if exceeded == true { showQuotaAlert = true }
+        }
     }
 
     private var currentAgent: Agent? {
@@ -122,6 +138,8 @@ struct ContentView: View {
             return "定时提醒"
         case .skills:
             return "技能库"
+        case .usageStatistics:
+            return "用量统计"
         case .settings:
             return "设置"
         case .chat(let agentId):
@@ -138,12 +156,23 @@ struct ContentView: View {
     private var detailView: some View {
         switch selectedNavigation {
         case .none:
-            Text("选择一个对话或功能开始")
-                .foregroundStyle(.secondary)
+            VStack(spacing: 12) {
+                Spacer()
+                Image(systemName: "message.badge.waveform")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("选择一个对话或功能开始")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(40)
         case .secondBrain:
             SecondBrainView(basePath: appState.secondBrainPath)
         case .tasks:
-            TasksView { context in
+            TasksView(manager: appState.taskManager) { context in
                 guard let agent = preferredMainAgent() else { return }
                 chatInjectedContext = context
                 selectedNavigation = .chat(agentId: agent.id)
@@ -158,6 +187,8 @@ struct ContentView: View {
             CronJobsView(appState: appState)
         case .skills:
             SkillsView()
+        case .usageStatistics:
+            UsageStatisticsView(service: appState.usageStatisticsService)
         case .settings:
             SettingsView(appState: appState)
         case .chat(let agentId):
@@ -177,7 +208,9 @@ struct ContentView: View {
                 }
             } else {
                 Text("选择一个对话或功能开始")
+                    .font(.title3)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         case .chatSession(let agentId, let sessionKey, _):
             if let agent = appState.agents.first(where: { $0.id == agentId }) {
@@ -194,7 +227,9 @@ struct ContentView: View {
                 }
             } else {
                 Text("选择一个对话或功能开始")
+                    .font(.title3)
                     .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
     }

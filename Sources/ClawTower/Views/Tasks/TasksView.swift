@@ -1,19 +1,21 @@
 import SwiftUI
 
 struct TasksView: View {
+    var manager: TaskManager
     var onOpenTaskContext: (String) -> Void
-
-    @State private var manager = TaskManager()
     @State private var showCreateSheet = false
+    @State private var editingTask: TaskItem?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            taskColumn(status: .todo, title: "待办", color: .blue)
-            taskColumn(status: .inProgress, title: "进行中", color: .yellow)
-            taskColumn(status: .inReview, title: "待审核", color: .purple)
-            taskColumn(status: .done, title: "已完成", color: .green)
+        ScrollView(.horizontal, showsIndicators: true) {
+            HStack(alignment: .top, spacing: 12) {
+                taskColumn(status: .todo, title: "待办", color: .blue)
+                taskColumn(status: .inProgress, title: "进行中", color: .yellow)
+                taskColumn(status: .inReview, title: "待审核", color: .purple)
+                taskColumn(status: .done, title: "已完成", color: .green)
+            }
+            .padding(16)
         }
-        .padding(16)
         .navigationTitle("任务看板")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -27,6 +29,13 @@ struct TasksView: View {
         .sheet(isPresented: $showCreateSheet) {
             CreateTaskSheet { title, priority, note in
                 Task { await manager.addTask(title: title, priority: priority, note: note) }
+            }
+        }
+        .sheet(item: $editingTask) { task in
+            EditTaskSheet(task: task) { title, priority, status, context in
+                Task { await manager.updateTask(taskID: task.id, title: title, priority: priority, status: status, context: context) }
+            } onExecute: { context in
+                onOpenTaskContext(context)
             }
         }
         .task {
@@ -61,7 +70,7 @@ struct TasksView: View {
                 LazyVStack(spacing: 8) {
                     ForEach(displayTasks) { task in
                         TaskCard(task: task) {
-                            onOpenTaskContext(task.context)
+                            editingTask = task
                         } onMarkDone: {
                             Task { await manager.markTaskDone(taskID: task.id) }
                         }
@@ -86,7 +95,7 @@ struct TasksView: View {
                 return true
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(width: 280)
         .background(Color(.controlBackgroundColor).opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
@@ -123,11 +132,6 @@ private struct TaskCard: View {
                 .buttonStyle(.plain)
                 .disabled(task.status == .done)
             }
-            if !task.source.isEmpty {
-                Text(task.source)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
             if !task.context.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(task.context)
@@ -156,21 +160,49 @@ private struct CreateTaskSheet: View {
     let onCreate: (String, TaskItem.Priority, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.themeColor) private var themeColor
     @State private var title = ""
     @State private var priority: TaskItem.Priority = .medium
     @State private var note = ""
 
     var body: some View {
         NavigationStack {
-            Form {
-                TextField("标题", text: $title)
-                Picker("优先级", selection: $priority) {
-                    ForEach(TaskItem.Priority.allCases, id: \.self) { p in
-                        Text(p.title).tag(p)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // 标题输入
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("标题")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        TextField("任务标题", text: $title)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    // 优先级
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("优先级")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $priority) {
+                            ForEach(TaskItem.Priority.allCases, id: \.self) { p in
+                                Label(p.title, systemImage: p.icon).tag(p)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                    }
+
+                    // 备注
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("备注（可选）")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        TextField("输入备注", text: $note, axis: .vertical)
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(3...8)
                     }
                 }
-                TextField("备注（可选）", text: $note, axis: .vertical)
-                    .lineLimit(2...5)
+                .padding(20)
             }
             .navigationTitle("新建任务")
             .toolbar {
@@ -183,9 +215,133 @@ private struct CreateTaskSheet: View {
                         dismiss()
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .tint(themeColor)
                 }
             }
         }
-        .frame(minWidth: 420, minHeight: 280)
+        .frame(minWidth: 420, minHeight: 300)
+    }
+}
+
+private struct EditTaskSheet: View {
+    let task: TaskItem
+    let onSave: (String, TaskItem.Priority, TaskItem.Status, String) -> Void
+    let onExecute: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.themeColor) private var themeColor
+    @State private var title: String
+    @State private var priority: TaskItem.Priority
+    @State private var status: TaskItem.Status
+    @State private var context: String
+
+    init(task: TaskItem, onSave: @escaping (String, TaskItem.Priority, TaskItem.Status, String) -> Void, onExecute: @escaping (String) -> Void) {
+        self.task = task
+        self.onSave = onSave
+        self.onExecute = onExecute
+        _title = State(initialValue: task.title)
+        _priority = State(initialValue: task.priority)
+        _status = State(initialValue: task.status)
+        _context = State(initialValue: task.context)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    // 标题
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("标题")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        TextField("任务标题", text: $title)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    // 优先级 & 状态
+                    HStack(spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("优先级")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: $priority) {
+                                ForEach(TaskItem.Priority.allCases, id: \.self) { p in
+                                    Label(p.title, systemImage: p.icon).tag(p)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("状态")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            Picker("", selection: $status) {
+                                ForEach(TaskItem.Status.allCases, id: \.self) { s in
+                                    Text(s.title).tag(s)
+                                }
+                            }
+                            .labelsHidden()
+                        }
+                    }
+
+                    // 备注
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("备注")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        TextEditor(text: $context)
+                            .font(.body)
+                            .frame(minHeight: 100)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .background(Color(.textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.2))
+                            )
+                    }
+
+                    // 立即执行
+                    HStack {
+                        Spacer()
+                        Button {
+                            let text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let ctx = context.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let content = ctx.isEmpty ? text : text + "\n" + ctx
+                            onExecute(content)
+                            dismiss()
+                        } label: {
+                            Label("立即执行", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(themeColor)
+                        Spacer()
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("编辑任务")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("返回") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        onSave(
+                            title.trimmingCharacters(in: .whitespacesAndNewlines),
+                            priority,
+                            status,
+                            context.trimmingCharacters(in: .whitespacesAndNewlines)
+                        )
+                        dismiss()
+                    }
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .tint(themeColor)
+                }
+            }
+        }
+        .frame(minWidth: 480, minHeight: 460)
     }
 }

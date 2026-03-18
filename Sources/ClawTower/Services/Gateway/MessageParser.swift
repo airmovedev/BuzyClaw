@@ -75,6 +75,27 @@ struct MessageParser {
         return ""
     }
     
+    /// 从 content 中仅提取纯文本部分，跳过 toolCall 等非文本 block
+    static func extractTextOnly(from content: Any?) -> String {
+        if let s = content as? String { return s }
+        if let arr = content as? [[String: Any]] {
+            return arr.compactMap { block -> String? in
+                let type = block["type"] as? String ?? "text"
+                switch type {
+                case "text":
+                    return block["text"] as? String
+                case "task_completion":
+                    let label = block["label"] as? String ?? "子任务"
+                    let status = block["status"] as? String ?? "completed"
+                    return "[任务完成: \(label) (\(status))]"
+                default:
+                    return nil
+                }
+            }.joined(separator: "\n")
+        }
+        return ""
+    }
+
     /// 提取 toolCall blocks 的详情（兼容 arguments 和 input 两种字段名）
     static func extractToolCalls(from content: Any?) -> [(name: String, arguments: [String: Any])] {
         guard let arr = content as? [[String: Any]] else { return [] }

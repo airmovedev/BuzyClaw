@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Ensure Homebrew tools are in PATH
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH}"
+
 # ============================================================
 # ClawTower — One-click DMG Builder
 # ============================================================
@@ -16,14 +19,15 @@ set -e
 # both signing and notarization are skipped.
 # ============================================================
 
-APP_NAME="ClawTower"
-SCHEME="ClawTower"
+APP_NAME="BuzyClaw"
+DMG_NAME="BuzyClaw"
+SCHEME="BuzyClaw_mac"
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="${PROJECT_DIR}/build"
 ARCHIVE_PATH="${BUILD_DIR}/${APP_NAME}.xcarchive"
 EXPORT_DIR="${BUILD_DIR}/export"
 APP_PATH="${EXPORT_DIR}/${APP_NAME}.app"
-DMG_PATH="${BUILD_DIR}/${APP_NAME}.dmg"
+DMG_PATH="${BUILD_DIR}/${DMG_NAME}.dmg"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 SIGNED_ENTITLEMENTS_PLIST="${BUILD_DIR}/entitlements-signed-${TIMESTAMP}.plist"
 
@@ -31,9 +35,15 @@ SIGNED_ENTITLEMENTS_PLIST="${BUILD_DIR}/entitlements-signed-${TIMESTAMP}.plist"
 SIGN_STATUS="skipped"
 NOTARIZE_STATUS="skipped"
 
-# Default Team ID / signing identity
+# Default credentials / signing identity
+APPLE_ID="${APPLE_ID:-airmove.dev@outlook.com}"
 TEAM_ID="${TEAM_ID:-USYB32X4N8}"
 DEVELOPER_ID="Developer ID Application: AIRGO LIMITED (USYB32X4N8)"
+# Pin the known-good certificate SHA-1. There are duplicate certs with the same
+# common name in the keychain; Xcode may pick the wrong one and hang forever in
+# codesign during exportArchive.
+DEVELOPER_ID_SHA1="${DEVELOPER_ID_SHA1:-D38091FF3215A076B0A383CBD852CB1B4EB22458}"
+EXPORT_TIMEOUT_SECONDS="${EXPORT_TIMEOUT_SECONDS:-900}"
 
 echo "============================================================"
 echo "  ${APP_NAME} DMG Builder"
@@ -49,7 +59,31 @@ rm -rf "${ARCHIVE_PATH}" "${EXPORT_DIR}" "${DMG_PATH}"
 mkdir -p "${BUILD_DIR}"
 
 # --------------------------------------------------
-# Step 1: xcodegen generate
+# Step 1: Detect signing identity & provisioning profile
+# --------------------------------------------------
+if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${DEVELOPER_ID}"; then
+    echo "  Found signing identity: ${DEVELOPER_ID}"
+else
+    echo "  ⚠ Developer ID certificate not found — build will be unsigned"
+    DEVELOPER_ID=""
+fi
+
+# Find the Developer ID (Direct) provisioning profile for embedding
+DEVID_PROFILE_PATH=""
+if [ -n "${DEVELOPER_ID}" ]; then
+    for pf in "${HOME}/Library/Developer/Xcode/UserData/Provisioning Profiles"/*.provisionprofile; do
+        if security cms -D -i "${pf}" 2>/dev/null | grep -q "ProvisionsAllDevices"; then
+            if security cms -D -i "${pf}" 2>/dev/null | grep -q "com.clawtower.app"; then
+                DEVID_PROFILE_PATH="${pf}"
+                echo "  Found Developer ID provisioning profile: $(basename "${pf}")"
+                break
+            fi
+        fi
+    done
+fi
+
+# --------------------------------------------------
+# Step 1.5: xcodegen generate
 # --------------------------------------------------
 echo "▸ Step 1: Running xcodegen generate..."
 cd "${PROJECT_DIR}"
@@ -57,14 +91,20 @@ xcodegen generate
 echo "  ✓ Xcode project generated"
 
 # --------------------------------------------------
-# Step 2: xcodebuild archive
+# Step 2: xcodebuild archive (unsigned — signing happens at export + re-sign)
 # --------------------------------------------------
 echo "▸ Step 2: Archiving (scheme: ${SCHEME}, macOS)..."
+# Archive without signing. The real Developer ID signing happens during
+# exportArchive in Step 3 and re-sign in Step 3.5.
 xcodebuild archive \
     -scheme "${SCHEME}" \
     -destination 'generic/platform=macOS' \
     -archivePath "${ARCHIVE_PATH}" \
-    -configuration Release
+    -configuration Release \
+    CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual \
+    CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+    PROVISIONING_PROFILE_SPECIFIER="" \
+    ENABLE_PROVISIONING_PROFILE=NO
 
 # Verify archive exists
 if [ ! -d "${ARCHIVE_PATH}" ]; then
@@ -78,13 +118,6 @@ echo "  ✓ Archive created: ${ARCHIVE_PATH}"
 # --------------------------------------------------
 echo "▸ Step 3: Exporting .app..."
 
-# Verify expected Developer ID certificate exists
-if security find-identity -v -p codesigning 2>/dev/null | grep -Fq "${DEVELOPER_ID}"; then
-    echo "  Found signing identity: ${DEVELOPER_ID}"
-else
-    DEVELOPER_ID=""
-fi
-
 mkdir -p "${EXPORT_DIR}"
 
 if [ -n "${DEVELOPER_ID}" ]; then
@@ -94,7 +127,7 @@ if [ -n "${DEVELOPER_ID}" ]; then
     echo "  Exporting with Developer ID provisioning via xcodebuild -exportArchive..."
 
     DEVID_EXPORT_OPTIONS="${BUILD_DIR}/ExportOptions-DeveloperID.plist"
-    cat > "${DEVID_EXPORT_OPTIONS}" <<'EXPORTPLIST'
+    cat > "${DEVID_EXPORT_OPTIONS}" <<EXPORTPLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -102,20 +135,52 @@ if [ -n "${DEVELOPER_ID}" ]; then
     <key>method</key>
     <string>developer-id</string>
     <key>teamID</key>
-    <string>USYB32X4N8</string>
+    <string>${TEAM_ID}</string>
     <key>signingStyle</key>
-    <string>automatic</string>
+    <string>manual</string>
+    <key>signingCertificate</key>
+    <string>${DEVELOPER_ID_SHA1}</string>
+    <key>installerSigningCertificate</key>
+    <string>${DEVELOPER_ID_SHA1}</string>
     <key>iCloudContainerEnvironment</key>
     <string>Production</string>
 </dict>
 </plist>
 EXPORTPLIST
 
-    xcodebuild -exportArchive \
-        -archivePath "${ARCHIVE_PATH}" \
-        -exportOptionsPlist "${DEVID_EXPORT_OPTIONS}" \
-        -exportPath "${EXPORT_DIR}" \
-        -allowProvisioningUpdates
+    EXPORT_LOG="${BUILD_DIR}/export-${TIMESTAMP}.log"
+    echo "  Pinned signing certificate SHA1: ${DEVELOPER_ID_SHA1}"
+    echo "  exportArchive timeout: ${EXPORT_TIMEOUT_SECONDS}s"
+
+    set +e
+    python3 - <<PY 2>&1 | tee "${EXPORT_LOG}"
+import subprocess, sys
+cmd = [
+    'xcodebuild', '-exportArchive',
+    '-archivePath', '${ARCHIVE_PATH}',
+    '-exportOptionsPlist', '${DEVID_EXPORT_OPTIONS}',
+    '-exportPath', '${EXPORT_DIR}',
+    '-allowProvisioningUpdates',
+]
+print('Running:', ' '.join(cmd))
+try:
+    rc = subprocess.run(cmd, timeout=int('${EXPORT_TIMEOUT_SECONDS}')).returncode
+    raise SystemExit(rc)
+except subprocess.TimeoutExpired:
+    print('ERROR: exportArchive timed out after ${EXPORT_TIMEOUT_SECONDS}s')
+    raise SystemExit(124)
+PY
+    EXPORT_RC=${PIPESTATUS[0]}
+    set -e
+
+    if [ ${EXPORT_RC} -ne 0 ]; then
+        echo "  ⚠ xcodebuild -exportArchive failed or timed out (rc=${EXPORT_RC})"
+        echo "  Falling back to direct app extraction from archive; manual re-sign will run next."
+        rm -rf "${EXPORT_DIR}"/*
+        cp -R "${ARCHIVE_PATH}/Products/Applications/${APP_NAME}.app" "${EXPORT_DIR}/" 2>/dev/null \
+            || cp -R "${ARCHIVE_PATH}/Products/usr/local/bin/${APP_NAME}.app" "${EXPORT_DIR}/" 2>/dev/null \
+            || { echo "  ✗ Could not locate .app in archive after exportArchive fallback"; exit 1; }
+    fi
 else
     # Unsigned: just copy .app from archive
     echo "  No Developer ID certificate found — exporting unsigned..."
@@ -132,13 +197,22 @@ fi
 APP_SIZE=$(du -sh "${APP_PATH}" | cut -f1)
 echo "  ✓ Exported: ${APP_PATH} (${APP_SIZE})"
 
+# Embed provisioning profile if available and not already present
+if [ -n "${DEVID_PROFILE_PATH}" ] && [ ! -f "${APP_PATH}/Contents/embedded.provisionprofile" ]; then
+    echo "  Embedding Developer ID provisioning profile..."
+    cp "${DEVID_PROFILE_PATH}" "${APP_PATH}/Contents/embedded.provisionprofile"
+    echo "  ✓ Provisioning profile embedded"
+elif [ -f "${APP_PATH}/Contents/embedded.provisionprofile" ]; then
+    echo "  ✓ Provisioning profile already present"
+fi
+
 # --------------------------------------------------
 # Step 3.5: Recursive re-sign native binaries + app (inside-out)
 # --------------------------------------------------
 if [ -n "${DEVELOPER_ID}" ]; then
     echo "▸ Step 3.5: Re-signing native binaries recursively (inside-out)..."
 
-    APP_SIGN_ARGS=(--force --sign "${DEVELOPER_ID}" --entitlements "${PROJECT_DIR}/SupportFiles/ClawTower.entitlements" --timestamp --options runtime)
+    APP_SIGN_ARGS=(--force --sign "${DEVELOPER_ID_SHA1}" --entitlements "${PROJECT_DIR}/SupportFiles/ClawTower.entitlements" --timestamp --options runtime)
     echo "  Release signing strategy: sign WITH entitlements (preserve CloudKit + iCloud container environment)"
 
     RESIGN_LIST="${BUILD_DIR}/resign-targets-${TIMESTAMP}.txt"
@@ -164,9 +238,9 @@ if [ -n "${DEVELOPER_ID}" ]; then
         while IFS= read -r target; do
             [ -z "${target}" ] && continue
             if [ "$(basename "${target}")" = "node" ]; then
-                codesign --force --sign "${DEVELOPER_ID}" --entitlements Scripts/node.entitlements --timestamp --options runtime "${target}"
+                codesign --force --sign "${DEVELOPER_ID_SHA1}" --entitlements Scripts/node.entitlements --timestamp --options runtime "${target}"
             else
-                codesign --force --sign "${DEVELOPER_ID}" --timestamp --options runtime "${target}"
+                codesign --force --sign "${DEVELOPER_ID_SHA1}" --timestamp --options runtime "${target}"
             fi
         done < "${TARGETS_SORTED}"
     else
@@ -248,12 +322,12 @@ rm -f "${DMG_PATH}"
 if command -v create-dmg &>/dev/null; then
     echo "  Using create-dmg for prettier output..."
     create-dmg \
-        --volname "${APP_NAME}" \
+        --volname "${DMG_NAME}" \
         --volicon "${APP_PATH}/Contents/Resources/AppIcon.icns" \
         --window-pos 200 120 \
         --window-size 600 400 \
         --icon-size 100 \
-        --icon "${APP_NAME}.app" 150 190 \
+        --icon "${DMG_NAME}.app" 150 190 \
         --app-drop-link 450 190 \
         --format UDZO \
         "${DMG_PATH}" \
@@ -274,7 +348,7 @@ if [ ! -f "${DMG_PATH}" ]; then
     ln -s /Applications "${STAGING}/Applications"
 
     hdiutil create \
-        -volname "${APP_NAME}" \
+        -volname "${DMG_NAME}" \
         -srcfolder "${STAGING}" \
         -ov \
         -format UDZO \

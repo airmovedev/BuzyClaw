@@ -70,6 +70,23 @@ actor GatewayRelayClient {
     private let authToken: String
     private let session: URLSession
 
+    /// Tracks consecutive tool_error failures per tool name for backoff.
+    private var toolErrorCounts: [String: Int] = [:]
+
+    /// True when tools are in persistent backoff, indicating a likely token mismatch.
+    private(set) var hasToolErrorBackoff = false
+
+    /// Returns true if the given tool is currently in backoff due to repeated tool_error failures.
+    func isToolInBackoff(_ tool: String) -> Bool {
+        return (toolErrorCounts[tool] ?? 0) >= 3
+    }
+
+    /// Resets tool error count (e.g. when gateway restarts).
+    func resetToolErrors() {
+        toolErrorCounts.removeAll()
+        hasToolErrorBackoff = false
+    }
+
     init(baseURL: URL, authToken: String) {
         self.baseURL = baseURL
         self.authToken = authToken
@@ -82,6 +99,11 @@ actor GatewayRelayClient {
     // MARK: - Session history
 
     func fetchSessionHistory(sessionKey: String, limit: Int = 50) async throws -> [SessionHistoryMessage] {
+        let toolName = "sessions_history"
+
+        // Skip if tool is in backoff from repeated failures
+        if isToolInBackoff(toolName) { return [] }
+
         let url = baseURL.appendingPathComponent("tools/invoke")
 
         var request = URLRequest(url: url)
@@ -92,7 +114,7 @@ actor GatewayRelayClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
         let body = ToolsInvokeRequest(
-            tool: "sessions_history",
+            tool: toolName,
             args: [
                 "sessionKey": .string(sessionKey),
                 "limit": .int(limit),
@@ -104,10 +126,21 @@ actor GatewayRelayClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw RelayError.invalidResponse
         }
+
+        // Handle tool_error 500s gracefully — the Gateway's internal WebSocket RPC can fail
+        // when there's an auth/pairing issue. Return empty instead of spamming errors.
+        if httpResponse.statusCode == 500, isToolErrorResponse(data) {
+            trackToolError(toolName)
+            return []
+        }
+
         guard (200..<300).contains(httpResponse.statusCode) else {
             let errorBody = String(data: data, encoding: .utf8) ?? ""
             throw RelayError.httpError(statusCode: httpResponse.statusCode, body: String(errorBody.prefix(500)))
         }
+
+        // Success — reset error count
+        toolErrorCounts[toolName] = 0
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = json["result"] as? [String: Any],
@@ -190,6 +223,9 @@ actor GatewayRelayClient {
     }
 
     private func invokeTool(tool: String, args: [String: AnyCodableValue]) async throws -> [String: Any] {
+        // Skip if tool is in backoff from repeated failures
+        if isToolInBackoff(tool) { return [:] }
+
         let url = baseURL.appendingPathComponent("tools/invoke")
 
         var request = URLRequest(url: url)
@@ -206,10 +242,20 @@ actor GatewayRelayClient {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw RelayError.invalidResponse
         }
+
+        // Handle tool_error 500s gracefully
+        if httpResponse.statusCode == 500, isToolErrorResponse(data) {
+            trackToolError(tool)
+            return [:]
+        }
+
         guard (200..<300).contains(httpResponse.statusCode) else {
             let errorBody = String(data: data, encoding: .utf8) ?? ""
             throw RelayError.httpError(statusCode: httpResponse.statusCode, body: String(errorBody.prefix(500)))
         }
+
+        // Success — reset error count
+        toolErrorCounts[tool] = 0
 
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let result = json["result"] as? [String: Any],
@@ -358,6 +404,30 @@ actor GatewayRelayClient {
         }
 
         return fullResponse
+    }
+
+    // MARK: - Tool error detection
+
+    /// Check if a 500 response body is a tool_error (Gateway internal WebSocket RPC failure).
+    private func isToolErrorResponse(_ data: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let error = json["error"] as? [String: Any],
+              let type = error["type"] as? String else {
+            return false
+        }
+        return type == "tool_error"
+    }
+
+    /// Track a tool_error failure. Logs only on first failure and when entering backoff.
+    private func trackToolError(_ tool: String) {
+        let count = (toolErrorCounts[tool] ?? 0) + 1
+        toolErrorCounts[tool] = count
+        if count == 1 {
+            NSLog("[GatewayRelayClient] Tool '%@' returned tool_error (Gateway 内部 RPC 失败), will retry", tool)
+        } else if count == 3 {
+            NSLog("[GatewayRelayClient] Tool '%@' failed %d times, entering backoff — Gateway 可能需要重启", tool, count)
+            hasToolErrorBackoff = true
+        }
     }
 }
 

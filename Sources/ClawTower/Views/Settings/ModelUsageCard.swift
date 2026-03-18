@@ -44,6 +44,15 @@ struct ModelUsageCard: View {
                 if info.isAvailable {
                     if info.hasUsageData {
                         VStack(alignment: .leading, spacing: 4) {
+                            if info.errorMessage == "已达上限" {
+                                HStack(spacing: 4) {
+                                    Circle().fill(.orange).frame(width: 6, height: 6)
+                                    Text("已达上限")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+
                             if let fiveH = info.fiveHourUtilization {
                                 usageBar(label: "5H", value: fiveH, resetTime: info.fiveHourResetTime)
                             }

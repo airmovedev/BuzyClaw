@@ -32,7 +32,13 @@ targets:
       properties:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
+        CFBundleDisplayName: "虾忙"
+        LSHasLocalizedDisplayName: true
         LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        NSCameraUsageDescription: "虾忙需要访问摄像头，以便 AI 通过视觉获取信息来帮助你完成任务"
+        NSMicrophoneUsageDescription: "虾忙需要访问麦克风，以便 AI 听取你的语音指令"
+        NSCalendarsFullAccessUsageDescription: "虾忙需要访问日历，以便 AI 查看和管理你的日程安排"
+        NSRemindersFullAccessUsageDescription: "虾忙需要访问提醒事项，以便 AI 帮你创建和管理待办事项"
     entitlements:
       path: SupportFiles/ClawTower.entitlements
       properties:
@@ -50,7 +56,7 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.clawtower.app
-        PRODUCT_NAME: ClawTower
+        PRODUCT_NAME: BuzyClaw
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: USYB32X4N8
@@ -71,18 +77,23 @@ targets:
         type: file
       - path: Sources/ClawTower/Models/CronJob.swift
         type: file
+      - path: Sources/ClawTower/Services/ThemeManager.swift
+        type: file
       - path: SupportFiles/Localization
         buildPhase: resources
     resources:
       - path: Sources/ClawTowerMobile/Resources/Assets.xcassets
+      - path: Sources/ClawTowerMobile/Resources/WhisperKitModels
+        type: folder
+        buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.clawtower.mobile
+        PRODUCT_BUNDLE_IDENTIFIER: airgo.buzyclaw.com
         INFOPLIST_FILE: SupportFiles/MobileInfo.plist
         CODE_SIGN_ENTITLEMENTS: SupportFiles/ClawTowerMobile.entitlements
-        PRODUCT_NAME: ClawTowerMobile
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "11"
+        PRODUCT_NAME: BuzyClaw
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: false
         CODE_SIGN_IDENTITY: "Apple Development"
         CODE_SIGNING_REQUIRED: true
@@ -91,12 +102,14 @@ targets:
         SWIFT_EMIT_LOC_STRINGS: true
         ENABLE_PREVIEWS: true
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
-        TARGETED_DEVICE_FAMILY: "1,2"
+        TARGETED_DEVICE_FAMILY: "1"
     dependencies:
       - package: MarkdownUI
+      - package: WhisperKit
+        product: WhisperKit
 
 schemes:
-  ClawTower:
+  BuzyClaw_mac:
     build:
       targets:
         ClawTower: all
@@ -108,7 +121,7 @@ schemes:
       config: Debug
     archive:
       config: Release
-  ClawTowerMobile:
+  BuzyClaw_phone:
     build:
       targets:
         ClawTowerMobile: all
@@ -128,3 +141,6 @@ packages:
   MarkdownUI:
     url: https://github.com/gonzalezreal/swift-markdown-ui
     from: "2.0.0"
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: "0.9.0"

@@ -9,12 +9,14 @@ import os.log
 final class DashboardSyncService {
     var lastSyncedAt: Date?
     var syncError: String?
+    var isQuotaExceeded = false
 
     private let logger = Logger(subsystem: "com.clawtower.mac", category: "DashboardSyncService")
 
     private var timer: Timer?
     private let syncInterval: TimeInterval = 30
     private let database = CKContainer(identifier: CloudKitConstants.containerID).privateCloudDatabase
+    private var zoneEnsured = false
 
     private weak var appState: AppState?
 
@@ -22,7 +24,10 @@ final class DashboardSyncService {
         self.appState = appState
         stop()
         // Sync immediately, then every 30s
-        Task { await self.sync() }
+        Task {
+            await self.ensureZoneExists()
+            await self.sync()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: syncInterval, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
@@ -36,14 +41,32 @@ final class DashboardSyncService {
         timer = nil
     }
 
+    private func ensureZoneExists() async {
+        guard !zoneEnsured else { return }
+        let zone = CKRecordZone(zoneID: CloudKitConstants.zoneID)
+        do {
+            try await database.save(zone)
+            logger.info("ClawTowerZone created or confirmed for DashboardSync")
+        } catch {
+            logger.debug("Zone creation result: \(error.localizedDescription)")
+        }
+        zoneEnsured = true
+    }
+
     private func sync() async {
         guard let appState else { return }
         let commandStatuses = await checkModelChangeCommands()
 
+        // Fetch existing record to preserve its changeTag (avoids serverRecordChanged conflicts
+        // when multiple Macs write to the same "latest-dashboard" record).
+        let existingRecord: CKRecord?
         let previousSnapshot: DashboardSnapshot?
-        if let record = try? await database.record(for: DashboardSnapshotRecord.recordID) {
-            previousSnapshot = DashboardSnapshotRecord.from(record: record)
-        } else {
+        do {
+            let fetched = try await database.record(for: DashboardSnapshotRecord.recordID)
+            existingRecord = fetched
+            previousSnapshot = DashboardSnapshotRecord.from(record: fetched)
+        } catch {
+            existingRecord = nil
             previousSnapshot = nil
         }
 
@@ -53,10 +76,52 @@ final class DashboardSyncService {
             commandStatuses: commandStatuses
         )
         do {
-            let record = try DashboardSnapshotRecord.toCKRecord(snapshot)
-            _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
+            let record: CKRecord
+            if let existingRecord {
+                // Update the fetched record in-place — keeps changeTag intact
+                try DashboardSnapshotRecord.applySnapshot(snapshot, to: existingRecord)
+                record = existingRecord
+            } else {
+                // First time: create a new record
+                record = try DashboardSnapshotRecord.toCKRecord(snapshot)
+            }
+            _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .changedKeys)
             lastSyncedAt = Date()
             syncError = nil
+            isQuotaExceeded = false
+        } catch let ckError as CKError where ckError.code == .quotaExceeded {
+            logger.error("iCloud quota exceeded — cannot sync dashboard")
+            syncError = "iCloud 空间不足，无法同步看板数据"
+            isQuotaExceeded = true
+        } catch let ckError as CKError where ckError.code == .zoneNotFound {
+            // Zone doesn't exist yet — create it and retry once
+            logger.warning("Zone not found during sync, creating zone and retrying...")
+            zoneEnsured = false
+            await ensureZoneExists()
+            do {
+                let record = try DashboardSnapshotRecord.toCKRecord(snapshot)
+                _ = try await database.modifyRecords(saving: [record], deleting: [], savePolicy: .allKeys)
+                lastSyncedAt = Date()
+                syncError = nil
+            } catch let retryError as CKError where retryError.code == .quotaExceeded {
+                logger.error("iCloud quota exceeded — cannot sync dashboard")
+                syncError = "iCloud 空间不足，无法同步看板数据"
+                isQuotaExceeded = true
+            } catch {
+                syncError = error.localizedDescription
+            }
+        } catch let ckError as CKError where ckError.code == .serverRecordChanged {
+            // Another device updated the record between our fetch and save — retry once
+            logger.warning("Server record changed during sync, retrying with latest...")
+            do {
+                let latestRecord = try await database.record(for: DashboardSnapshotRecord.recordID)
+                try DashboardSnapshotRecord.applySnapshot(snapshot, to: latestRecord)
+                _ = try await database.modifyRecords(saving: [latestRecord], deleting: [], savePolicy: .changedKeys)
+                lastSyncedAt = Date()
+                syncError = nil
+            } catch {
+                syncError = error.localizedDescription
+            }
         } catch {
             syncError = error.localizedDescription
         }
@@ -158,6 +223,11 @@ final class DashboardSyncService {
             let resolvedVibe = Self.preferredNonEmpty(vibe, previous?.vibe)
             let resolvedAvailableModels = Self.agentAvailableModels(agentId: agent.id, config: config, globalModels: availableModels)
             let heartbeatModel = Self.agentHeartbeatModel(agentId: agent.id, config: config) ?? previous?.heartbeatModel
+            let workspaceFiles = Self.loadWorkspaceFiles(
+                agentId: agent.id,
+                config: config,
+                basePath: appState.openclawBasePath
+            )
 
             return AgentSnapshot(
                 id: agent.id,
@@ -176,7 +246,8 @@ final class DashboardSyncService {
                 creature: resolvedCreature,
                 vibe: resolvedVibe,
                 lastMessage: previous?.lastMessage,
-                latestModelCommand: commandStatuses[agent.id] ?? previous?.latestModelCommand
+                latestModelCommand: commandStatuses[agent.id] ?? previous?.latestModelCommand,
+                workspaceFiles: workspaceFiles.isEmpty ? previous?.workspaceFiles : workspaceFiles
             )
         }
 
@@ -505,6 +576,49 @@ final class DashboardSyncService {
             if t.contains("**Vibe:**") { vibe = t.replacingOccurrences(of: "- **Vibe:**", with: "").trimmingCharacters(in: .whitespaces) }
         }
         return (emoji, name, creature, vibe)
+    }
+
+    nonisolated private static let workspaceMDFiles = [
+        "IDENTITY.md", "AGENTS.md", "SOUL.md", "HEARTBEAT.md", "MEMORY.md", "TOOLS.md"
+    ]
+
+    nonisolated private static func resolveWorkspacePath(agentId: String, config: [String: Any]?, basePath: URL) -> String? {
+        let candidates: [String] = {
+            if agentId == "main" {
+                return [basePath.appendingPathComponent("workspace").path]
+            }
+
+            var list = [basePath.appendingPathComponent("agents/\(agentId)/workspace").path]
+            if let agentsConfig = config?["agents"] as? [String: Any],
+               let agentsList = agentsConfig["list"] as? [[String: Any]],
+               let agentConf = agentsList.first(where: { ($0["id"] as? String) == agentId }),
+               let ws = agentConf["workspace"] as? String {
+                list.insert((ws as NSString).expandingTildeInPath, at: 0)
+            }
+            list.append(basePath.appendingPathComponent("workspace-\(agentId)").path)
+            return list
+        }()
+
+        let fm = FileManager.default
+        return candidates.first { fm.fileExists(atPath: $0) }
+    }
+
+    nonisolated private static func loadWorkspaceFiles(agentId: String, config: [String: Any]?, basePath: URL) -> [AgentWorkspaceFile] {
+        guard let workspacePath = resolveWorkspacePath(agentId: agentId, config: config, basePath: basePath) else {
+            return []
+        }
+
+        let maxChars = 30000
+        var files: [AgentWorkspaceFile] = []
+        for fileName in workspaceMDFiles {
+            let filePath = (workspacePath as NSString).appendingPathComponent(fileName)
+            guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else { continue }
+            let truncated = content.count > maxChars
+                ? String(content.prefix(maxChars)) + "\n\n---\n\n> ⚠️ 文档过长，仅显示前 \(maxChars) 字符"
+                : content
+            files.append(AgentWorkspaceFile(fileName: fileName, content: truncated))
+        }
+        return files
     }
 
     private func loadCronJobs(client: GatewayClient) async -> [CronJobSnapshot] {

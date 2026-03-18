@@ -14,7 +14,9 @@ struct ClawTowerMobileApp: App {
     @State private var messageClient = CloudKitMessageClient()
     @State private var snapshotStore = DashboardSnapshotStore()
     @State private var navigationState = NavigationState()
+    @State private var speechService = SpeechRecognitionService()
     @Environment(\.scenePhase) private var scenePhase
+    private let themeManager = ThemeManager.shared
 
     var body: some Scene {
         WindowGroup {
@@ -28,12 +30,12 @@ struct ClawTowerMobileApp: App {
 
                 MobileDashboardView()
                     .tabItem {
-                        Label("看板", systemImage: "square.grid.2x2")
+                        Label("看板", systemImage: "checklist")
                     }
 
                 MobileSecondBrainView()
                     .tabItem {
-                        Label("大脑", systemImage: "brain")
+                        Label("记忆", systemImage: "brain")
                     }
 
                 MobileCronJobsView()
@@ -47,17 +49,26 @@ struct ClawTowerMobileApp: App {
                     }
             }
             } // end VStack
+            .environment(\.themeColor, themeManager.themeColor)
+            .tint(themeManager.themeColor)
             .environment(messageClient)
             .environment(snapshotStore)
             .environment(navigationState)
+            .environment(speechService)
+            .alert("iCloud 空间不足", isPresented: $messageClient.showQuotaExceededAlert) {
+                Button("好的", role: .cancel) {}
+            } message: {
+                Text("无法同步数据。请及时扩容或清理空间。")
+            }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
                 case .active:
                     messageClient.appDidBecomeActive()
-                    Task { await snapshotStore.refresh() }
+                    snapshotStore.appDidBecomeActive()
                     UIApplication.shared.applicationIconBadgeNumber = 0
                 case .background:
                     messageClient.appDidEnterBackground()
+                    snapshotStore.appDidEnterBackground()
                 default:
                     break
                 }
@@ -68,7 +79,9 @@ struct ClawTowerMobileApp: App {
                 AppDelegate.navigationState = navigationState
                 AppDelegate.messageClient = messageClient
                 messageClient.start()
-                await snapshotStore.refresh()
+                snapshotStore.start()
+                // Load WhisperKit model in background so it's ready when user taps mic
+                await speechService.loadModel()
             }
         }
     }
@@ -133,7 +146,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.badge])
+        completionHandler([.banner, .sound, .badge])
     }
 }
 

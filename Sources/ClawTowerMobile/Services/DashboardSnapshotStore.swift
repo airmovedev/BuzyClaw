@@ -13,11 +13,21 @@ final class DashboardSnapshotStore {
     private let container: CKContainer
     private let database: CKDatabase
     private let logger = Logger(subsystem: "com.clawtower.mobile", category: "DashboardSnapshotStore")
+    private let foregroundPollingInterval: TimeInterval = 60
+    private var pollingTask: Task<Void, Never>?
 
     init(container: CKContainer = CKContainer(identifier: CloudKitConstants.containerID)) {
         self.container = container
         self.database = container.privateCloudDatabase
         loadCache()
+    }
+
+    /// Whether the macOS app appears to be online, based on the dashboard snapshot timestamp.
+    /// The macOS app pushes a snapshot every ~30 seconds; if the last one is older than 2 minutes,
+    /// we consider the macOS side disconnected.
+    var isMacOSConnected: Bool {
+        guard let ts = snapshot?.timestamp else { return false }
+        return Date().timeIntervalSince(ts) < 120
     }
 
     var agents: [AgentSnapshot] {
@@ -170,9 +180,31 @@ final class DashboardSnapshotStore {
     func start() {
         loadCache()
         Task { await refresh() }
+        startPolling()
     }
     
     func appDidBecomeActive() {
         Task { await refresh() }
+        startPolling()
+    }
+
+    func appDidEnterBackground() {
+        stopPolling()
+    }
+
+    private func startPolling() {
+        guard pollingTask == nil else { return }
+        pollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(self?.foregroundPollingInterval ?? 60))
+                guard !Task.isCancelled else { break }
+                await self?.refresh()
+            }
+        }
+    }
+
+    private func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
     }
 }

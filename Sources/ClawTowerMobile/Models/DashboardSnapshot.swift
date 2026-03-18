@@ -32,6 +32,37 @@ struct DashboardSnapshot: Codable, Sendable {
     }
 }
 
+struct AgentWorkspaceFile: Identifiable, Codable, Hashable, Sendable {
+    let fileName: String
+    let content: String
+
+    var id: String { fileName }
+
+    var displayName: String {
+        switch fileName {
+        case "IDENTITY.md": return "身份"
+        case "AGENTS.md": return "原则"
+        case "SOUL.md": return "灵魂"
+        case "HEARTBEAT.md": return "心跳"
+        case "MEMORY.md": return "记忆"
+        case "TOOLS.md": return "工具"
+        default: return fileName.replacingOccurrences(of: ".md", with: "")
+        }
+    }
+
+    var icon: String {
+        switch fileName {
+        case "IDENTITY.md": return "person.text.rectangle"
+        case "AGENTS.md": return "list.bullet.rectangle"
+        case "SOUL.md": return "sparkles"
+        case "HEARTBEAT.md": return "heart.text.square"
+        case "MEMORY.md": return "brain.head.profile"
+        case "TOOLS.md": return "wrench.and.screwdriver"
+        default: return "doc.text"
+        }
+    }
+}
+
 struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let displayName: String
@@ -50,6 +81,7 @@ struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
     let vibe: String?
     let lastMessage: String?
     let latestModelCommand: AgentModelCommandStatus?
+    let workspaceFiles: [AgentWorkspaceFile]?
 
     init(
         id: String,
@@ -68,7 +100,8 @@ struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
         creature: String? = nil,
         vibe: String? = nil,
         lastMessage: String? = nil,
-        latestModelCommand: AgentModelCommandStatus? = nil
+        latestModelCommand: AgentModelCommandStatus? = nil,
+        workspaceFiles: [AgentWorkspaceFile]? = nil
     ) {
         self.id = id
         self.displayName = displayName
@@ -88,6 +121,7 @@ struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
         self.vibe = vibe
         self.lastMessage = lastMessage
         self.latestModelCommand = latestModelCommand
+        self.workspaceFiles = workspaceFiles
     }
 
     var resolvedWorkingModel: String? {
@@ -117,7 +151,8 @@ struct AgentSnapshot: Identifiable, Codable, Hashable, Sendable {
             creature: AgentSnapshot.preferredNonEmpty(incoming.creature, creature),
             vibe: AgentSnapshot.preferredNonEmpty(incoming.vibe, vibe),
             lastMessage: AgentSnapshot.preferredNonEmpty(incoming.lastMessage, lastMessage),
-            latestModelCommand: incoming.latestModelCommand ?? latestModelCommand
+            latestModelCommand: incoming.latestModelCommand ?? latestModelCommand,
+            workspaceFiles: incoming.workspaceFiles ?? workspaceFiles
         )
     }
 
@@ -262,13 +297,18 @@ enum DashboardSnapshotRecord {
 
     static func toCKRecord(_ snapshot: DashboardSnapshot) throws -> CKRecord {
         let record = CKRecord(recordType: recordType, recordID: recordID)
+        try applySnapshot(snapshot, to: record)
+        return record
+    }
+
+    /// Update an existing CKRecord in-place (preserves changeTag to avoid serverRecordChanged conflicts).
+    static func applySnapshot(_ snapshot: DashboardSnapshot, to record: CKRecord) throws {
         let data = try JSONEncoder().encode(snapshot)
         guard let json = String(data: data, encoding: .utf8) else {
             throw NSError(domain: "DashboardSnapshot", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON"])
         }
         record["payload"] = json as CKRecordValue
         record["timestamp"] = (snapshot.timestamp ?? Date()) as CKRecordValue
-        return record
     }
 
     static func from(record: CKRecord) -> DashboardSnapshot? {

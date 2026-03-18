@@ -47,21 +47,21 @@ struct ClawTowerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        Window("ClawTower", id: "main") {
+        Window("app.name", id: "main") {
             ContentView(appDelegate: appDelegate)
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1000, height: 700)
 
-        MenuBarExtra("ClawTower", systemImage: "cpu") {
-            Button("打开 ClawTower") {
+        MenuBarExtra("app.name", image: "favicon") {
+            Button("menu.open") {
                 NSApp.activate(ignoringOtherApps: true)
                 if let window = NSApp.windows.first(where: { $0.className != "NSStatusBarWindow" && !$0.className.contains("MenuBarExtra") }) {
                     window.makeKeyAndOrderFront(nil)
                 }
             }
             Divider()
-            Button("退出") {
+            Button("menu.quit") {
                 NSApplication.shared.terminate(nil)
             }
         }

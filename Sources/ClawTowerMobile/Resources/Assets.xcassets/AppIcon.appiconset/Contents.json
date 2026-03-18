@@ -1,7 +1,7 @@
 {
   "images" : [
     {
-      "filename" : "clawtower_ios_icon.png",
+      "filename" : "clawtower_macOS.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"

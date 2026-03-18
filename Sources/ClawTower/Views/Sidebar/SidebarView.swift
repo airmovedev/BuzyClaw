@@ -1,9 +1,13 @@
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 struct SidebarView: View {
     @Bindable var appState: AppState
     @Binding var selectedNavigation: NavigationItem?
-
+    @Environment(\.themeColor) private var themeColor
+    @Environment(\.colorScheme) private var colorScheme
     @State private var showCreateSheet = false
     @State private var editingAgent: Agent?
     @State private var pendingDeleteAgent: Agent?
@@ -20,22 +24,34 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             List(selection: $selectedNavigation) {
-                Section("导航") {
+                Section {
                     NavigationLink(value: NavigationItem.tasks) {
                         Label("任务看板", systemImage: "checklist")
                     }
+                    .listRowBackground(rowBackground(for: .tasks))
 
                     NavigationLink(value: NavigationItem.cronJobs) {
                         Label("定时提醒", systemImage: "clock.badge.checkmark")
                     }
+                    .listRowBackground(rowBackground(for: .cronJobs))
 
                     NavigationLink(value: NavigationItem.skills) {
                         Label("技能库", systemImage: "puzzlepiece")
                     }
+                    .listRowBackground(rowBackground(for: .skills))
 
                     NavigationLink(value: NavigationItem.secondBrain) {
                         Label("记忆中枢", systemImage: "books.vertical")
                     }
+                    .listRowBackground(rowBackground(for: .secondBrain))
+
+                    NavigationLink(value: NavigationItem.usageStatistics) {
+                        Label("用量统计", systemImage: "chart.bar.fill")
+                    }
+                    .listRowBackground(rowBackground(for: .usageStatistics))
+                } header: {
+                    Text("导航")
+                        .font(.subheadline.weight(.semibold))
                 }
 
                 Section {
@@ -51,17 +67,21 @@ struct SidebarView: View {
                 } header: {
                     HStack {
                         Text("Agents")
+                            .font(.subheadline.weight(.semibold))
                         Spacer()
                         Button {
                             showCreateSheet = true
                         } label: {
                             Image(systemName: "plus")
+                                .font(.body)
                         }
                         .buttonStyle(.plain)
+                        .padding(.trailing, 4)
                     }
                 }
             }
             .listStyle(.sidebar)
+            .background(SidebarSelectionDisabler())
 
             Divider()
             HStack {
@@ -84,7 +104,9 @@ struct SidebarView: View {
             await appState.loadAgents()
             while !Task.isCancelled {
                 await loadSessions()
-                try? await Task.sleep(for: .seconds(5))
+                // Poll faster when subagents are active for responsive status updates
+                let hasActive = !activeSubagents.isEmpty || !activeAgentIDs.isEmpty
+                try? await Task.sleep(for: .seconds(hasActive ? 2 : 5))
                 await appState.loadAgents()
             }
         }
@@ -199,6 +221,7 @@ struct SidebarView: View {
                 agentLabel(agent)
             }
         }
+        .listRowBackground(rowBackground(for: .chat(agentId: agent.id)))
         .contextMenu { agentContextMenu(agent) }
 
         // 显示活跃的 sub-agent 任务
@@ -220,7 +243,10 @@ struct SidebarView: View {
         }
 
         if expandedAgents.contains(agent.id), !sessions.isEmpty {
-            ForEach(sessions) { session in
+            // Filter out subagent sessions that are already shown as active indicators above
+            let activeSubKeys = Set((activeSubagents[agent.id] ?? []).map(\.key))
+            let visibleSessions = sessions.filter { !activeSubKeys.contains($0.key) }
+            ForEach(visibleSessions) { session in
                 let label = sessionLabel(session)
                 NavigationLink(value: NavigationItem.chatSession(agentId: agent.id, sessionKey: session.key, label: label)) {
                     HStack {
@@ -236,6 +262,7 @@ struct SidebarView: View {
                         }
                     }
                 }
+                .listRowBackground(rowBackground(for: .chatSession(agentId: agent.id, sessionKey: session.key, label: label)))
                 .padding(.leading, 20)
             }
         }
@@ -334,12 +361,71 @@ struct SidebarView: View {
         return now.timeIntervalSince(updatedAt) < threshold
     }
 
+    /// A subagent is considered stale (likely finished) if it hasn't been updated recently.
+    /// This catches cases where the completion event format is unrecognized.
+    private func isSubagentStale(_ session: Session, now: Date = Date()) -> Bool {
+        guard let updatedAt = session.updatedAt else { return true }
+        // If no update in the last 30 seconds, treat as likely completed
+        return now.timeIntervalSince(updatedAt) > 30
+    }
+
+    /// Extract a human-readable summary from a subagent session's chat history.
+    /// Walks backwards through messages, extracting only text content (skipping
+    /// raw tool-call blocks) so the task notes show an actual completion summary.
+    private func extractSubagentSummary(_ sessionKey: String) async -> String {
+        guard let messages = try? await appState.gatewayClient.getHistoryWithTools(sessionKey: sessionKey, limit: 20) else {
+            return ""
+        }
+
+        var fallbackToolMessage = ""
+
+        for msg in messages.reversed() {
+            let role = msg["role"] as? String ?? ""
+            guard role == "assistant" else { continue }
+
+            let text = MessageParser.extractTextOnly(from: msg["content"])
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && !MessageParser.isHeartbeatOK(trimmed) {
+                return String(trimmed.prefix(2000))
+            }
+
+            let rawContent = MessageParser.extractText(from: msg["content"]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if fallbackToolMessage.isEmpty, rawContent.contains("[调用工具:") {
+                fallbackToolMessage = String(rawContent.prefix(2000))
+            }
+        }
+
+        return fallbackToolMessage
+    }
+
     // MARK: - Sessions
 
     private func loadSessions() async {
         guard let sessions = try? await appState.gatewayClient.listSessions(limit: 100) else { return }
+
+        // Deduplicate subagent sessions that share the same label across agents.
+        // When a parent agent dispatches a subagent, both the parent and child get
+        // a session with the same label. We keep only the child's (most recent) copy.
+        var subagentByLabel: [String: Session] = [:]
+        var duplicateKeys = Set<String>()
+        for session in sessions {
+            guard session.key.contains(":subagent:"), let label = session.label, !label.isEmpty else { continue }
+            if let existing = subagentByLabel[label] {
+                // Keep the more recently updated one; mark the other as duplicate
+                if (session.updatedAt ?? .distantPast) > (existing.updatedAt ?? .distantPast) {
+                    duplicateKeys.insert(existing.key)
+                    subagentByLabel[label] = session
+                } else {
+                    duplicateKeys.insert(session.key)
+                }
+            } else {
+                subagentByLabel[label] = session
+            }
+        }
+
         var grouped: [String: [Session]] = [:]
         for session in sessions {
+            guard !duplicateKeys.contains(session.key) else { continue }
             let isCron = session.key.contains(":cron:")
             let isSubagent = session.key.contains(":subagent:") && session.label != nil
             guard isCron || isSubagent else { continue }
@@ -355,11 +441,12 @@ struct SidebarView: View {
         }
         agentSessions = grouped
 
-        // 收集所有 subagent sessions
+        // 收集所有 subagent sessions（排除重复的 dispatch record）
         var allSubagentSessions: [String: [Session]] = [:]
         var currentSubagentKeys = Set<String>()
         for session in sessions {
             guard session.key.contains(":subagent:") else { continue }
+            guard !duplicateKeys.contains(session.key) else { continue }
             let parts = session.key.split(separator: ":")
             guard parts.count >= 2 else { continue }
             let agentId = String(parts[1])
@@ -376,27 +463,52 @@ struct SidebarView: View {
             let newKeys = currentSubagentKeys.subtracting(previousSubagentKeys)
             for key in newKeys {
                 appState.addTrackedSubagent(key)
+                // Auto-create a kanban task for the new subagent session
+                if let session = sessions.first(where: { $0.key == key }),
+                   let label = session.label, !label.isEmpty {
+                    let parentId = appState.taskManager.findMatchingParentTask(subagentTitle: label)
+                    await appState.taskManager.addSubagentTask(title: label, sessionKey: key, parentTaskId: parentId)
+                }
             }
             previousSubagentKeys = currentSubagentKeys
         }
 
-        // Sidebar 的 subagent 运行态尽量跟活动动态对齐：
-        // - 直接信任明确终态 status
-        // - 对 tracked subagent，不再用 idle / updatedAt 猜结束，而是检查历史里是否出现 completion event
+        // Detect completed subagent sessions using multiple signals:
+        // 1. Explicit terminal status (done, completed, failed, etc.)
+        // 2. Staleness: no updatedAt change in 30s → likely finished
+        // 3. History check: completion event in message history (only for recently active sessions)
+        let now = Date()
         let trackedSubagentSessions = sessions.filter { session in
             session.isSubAgent && appState.trackedSubagentKeys.contains(session.key)
         }
 
-        var completedKeys = Set(sessions.filter { session in
-            guard session.isSubAgent else { return false }
-            guard appState.trackedSubagentKeys.contains(session.key) else { return false }
-            return isTerminalSession(session)
-        }.map { $0.key })
+        var completedKeys = Set<String>()
+        var needsHistoryCheck: [Session] = []
 
-        for session in trackedSubagentSessions where !completedKeys.contains(session.key) {
+        for session in trackedSubagentSessions {
+            if isTerminalSession(session) {
+                // Signal 1: explicit terminal status
+                completedKeys.insert(session.key)
+            } else if isSubagentStale(session, now: now) {
+                // Signal 2: no activity for 30s — likely finished
+                completedKeys.insert(session.key)
+            } else {
+                // Still active; check history for completion event
+                needsHistoryCheck.append(session)
+            }
+        }
+
+        // Signal 3: only check history for still-active sessions (avoids unnecessary API calls)
+        for session in needsHistoryCheck {
             if await hasSubagentCompletionEvent(session.key) {
                 completedKeys.insert(session.key)
             }
+        }
+
+        // Auto-complete kanban tasks for finished subagent sessions
+        for key in completedKeys {
+            let summary = await extractSubagentSummary(key)
+            await appState.taskManager.completeSubagentTask(sessionKey: key, summary: summary)
         }
 
         // 统一回收 tracked keys：
@@ -421,7 +533,6 @@ struct SidebarView: View {
         activeSubagents = activeSubs
 
         // active agent IDs: tracked subagents + standalone agent main sessions with recent activity
-        let now = Date()
         var active = Set<String>()
         for (agentId, subs) in activeSubs {
             if !subs.isEmpty { active.insert(agentId) }
@@ -470,6 +581,18 @@ struct SidebarView: View {
     private func markSessionRead(_ sessionKey: String) {
         readTimestamps[sessionKey] = Date().timeIntervalSince1970
         UserDefaults.standard.set(readTimestamps, forKey: "SidebarReadTimestamps")
+    }
+
+    @ViewBuilder
+    private func rowBackground(for item: NavigationItem) -> some View {
+        if selectedNavigation == item {
+            RoundedRectangle(cornerRadius: 5)
+                .fill(themeColor.opacity(colorScheme == .dark ? 0.35 : 0.25))
+                .padding(.horizontal, 4)
+        } else {
+            // 提供透明背景，防止系统选中色泄漏
+            Color.clear
+        }
     }
 }
 
@@ -535,3 +658,47 @@ struct GatewayStatusBadge: View {
         }
     }
 }
+
+// MARK: - Disable default NSOutlineView selection highlight
+
+#if os(macOS)
+/// An invisible NSView that traverses the view hierarchy to find the parent
+/// NSOutlineView and suppresses its default selection highlight,
+/// so that `.listRowBackground()` can provide a custom theme-colored highlight.
+private struct SidebarSelectionDisabler: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        // Defer so the view is already in the hierarchy
+        DispatchQueue.main.async {
+            disableSelectionHighlight(in: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private func disableSelectionHighlight(in view: NSView) {
+        guard let outlineView = findOutlineView(from: view) else { return }
+        outlineView.selectionHighlightStyle = .none
+    }
+
+    private func findOutlineView(from view: NSView) -> NSOutlineView? {
+        var current: NSView? = view
+        while let v = current {
+            if let outline = v as? NSOutlineView { return outline }
+            // Also check siblings / subviews of ancestors
+            if let found = findOutlineViewInSubviews(of: v) { return found }
+            current = v.superview
+        }
+        return nil
+    }
+
+    private func findOutlineViewInSubviews(of view: NSView) -> NSOutlineView? {
+        for subview in view.subviews {
+            if let outline = subview as? NSOutlineView { return outline }
+            if let found = findOutlineViewInSubviews(of: subview) { return found }
+        }
+        return nil
+    }
+}
+#endif

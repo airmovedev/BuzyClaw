@@ -45,6 +45,8 @@ struct DetectedModel: Identifiable {
     private static func humanName(for slug: String, provider: String) -> String {
         var name = slug
             .replacingOccurrences(of: "-20\\d{6}", with: "", options: .regularExpression)
+            // Convert version-like patterns: "4-6" → "4.6", "3-5" → "3.5"
+            .replacingOccurrences(of: "(\\d)-(\\d)", with: "$1.$2", options: .regularExpression)
             .replacingOccurrences(of: "-", with: " ")
         name = name.split(separator: " ").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
         return name
@@ -94,11 +96,12 @@ private struct SessionVisibilityOptionsList: View {
 private struct SessionVisibilityOptionRow: View {
     let option: SessionVisibility
     let selected: Bool
+    @Environment(\.themeColor) private var themeColor
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
             Text(selected ? "●" : "○")
-                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                .foregroundStyle(selected ? themeColor : Color.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(option.title)
                     .font(.caption.weight(.medium))
@@ -111,16 +114,20 @@ private struct SessionVisibilityOptionRow: View {
 }
 
 struct SettingsView: View {
+    @Environment(\.themeColor) private var themeColor
     @Bindable var appState: AppState
     private let settingsTitle = "设置"
     @State private var apiKey = ""
     @State private var showResetAlert = false
     @State private var showProviderSheet = false
     @State private var detectedProviders: [String] = []
+    @State private var cachedModels: [DetectedModel] = []
     @State private var currentToolsProfile: String = "full"
     @State private var currentSessionVisibility: SessionVisibility = .tree
     @State private var isRestartingGateway = false
     @State private var showRestartHint = false
+    @State private var permissionStatus: [PermissionCapability: Bool] = [:]
+    @State private var pendingPermission: PermissionCapability?
     @AppStorage("launchAtLogin") private var launchAtLogin = true
 
     var body: some View {
@@ -140,7 +147,7 @@ struct SettingsView: View {
                             HStack {
                                 GatewayStatusBadge(gatewayManager: appState.gatewayManager)
                                 Spacer()
-                                Button(isRestartingGateway ? "重启中..." : "重启") {
+                                Button(isRestartingGateway ? "加载中..." : "重启") {
                                     Task {
                                         isRestartingGateway = true
                                         await appState.restartGateway()
@@ -148,6 +155,12 @@ struct SettingsView: View {
                                     }
                                 }
                                 .disabled(isRestartingGateway)
+                                .onAppear {
+                                    // Reset stale restart state when re-entering settings
+                                    if isRestartingGateway && appState.gatewayManager.isRunning {
+                                        isRestartingGateway = false
+                                    }
+                                }
                             }
 
                             if appState.gatewayManager.isRunning {
@@ -181,6 +194,9 @@ struct SettingsView: View {
                     }
                 }
 
+                // MARK: - 外观
+                AppearanceSection()
+
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("AI 模型")
@@ -198,16 +214,17 @@ struct SettingsView: View {
 
                     GroupBox {
                         VStack(alignment: .leading, spacing: 12) {
-                            if detectedModels.isEmpty {
+                            if cachedModels.isEmpty {
                                 Text("未配置 AI 服务")
                                     .foregroundStyle(.secondary)
                                 Button("配置 AI 服务") { showProviderSheet = true }
                                     .buttonStyle(.borderedProminent)
+                                    .tint(themeColor)
                             } else {
                                 VStack(spacing: 0) {
-                                    ForEach(Array(detectedModels.enumerated()), id: \.element.fullId) { index, model in
+                                    ForEach(Array(cachedModels.enumerated()), id: \.element.fullId) { index, model in
                                         ModelUsageRow(model: model, client: appState.gatewayClient)
-                                        if index < detectedModels.count - 1 {
+                                        if index < cachedModels.count - 1 {
                                             Divider()
                                         }
                                     }
@@ -218,11 +235,16 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .onAppear { detectAuthProfiles() }
+                .onAppear {
+                    detectAuthProfiles()
+                    refreshModelList()
+                }
                 .sheet(isPresented: $showProviderSheet) {
                     AIProviderSettingsView(appState: appState, isPresented: $showProviderSheet)
-                        .frame(minWidth: 500, minHeight: 450)
-                        .onDisappear { detectAuthProfiles() }
+                        .onDisappear {
+                            detectAuthProfiles()
+                            refreshModelList()
+                        }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -308,6 +330,8 @@ struct SettingsView: View {
 
                 HeartbeatSettingsView(appState: appState)
 
+                MemoryFlushSettingsView(appState: appState)
+
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("开机自启动")
@@ -338,12 +362,43 @@ struct SettingsView: View {
                                     }
                             }
 
-                            Text("登录时自动启动 ClawTower，保持 Gateway 常驻运行")
+                            Text("登录时自动启动虾忙，保持 Gateway 常驻运行")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("系统权限")
+                            .font(.headline)
+                        Spacer()
+                    }
+
+                    GroupBox {
+                        VStack(spacing: 4) {
+                            ForEach(PermissionCapability.allCases) { cap in
+                                settingsPermissionRow(cap)
+                            }
+                        }
+                        .padding(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .task {
+                    permissionStatus = await PermissionManager.shared.status()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                    Task {
+                        // First check after a short delay
+                        try? await Task.sleep(for: .milliseconds(500))
+                        permissionStatus = await PermissionManager.shared.status()
+                        // Second check after a longer delay to catch slow TCC propagation
+                        try? await Task.sleep(for: .seconds(1))
+                        permissionStatus = await PermissionManager.shared.status()
                     }
                 }
 
@@ -364,7 +419,7 @@ struct SettingsView: View {
                                     .foregroundStyle(.secondary)
                             }
 
-                            Text("虾忙基于 OpenClaw 开源项目开发。")
+                            Text("基于 OpenClaw 开源项目开发。")
                                 .font(.callout)
 
                             VStack(alignment: .leading, spacing: 6) {
@@ -442,6 +497,58 @@ struct SettingsView: View {
         }
     }
 
+    private func settingsPermissionRow(_ cap: PermissionCapability) -> some View {
+        let granted = permissionStatus[cap] ?? false
+        let isPending = pendingPermission == cap
+
+        return HStack(spacing: 10) {
+            Image(systemName: cap.icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(granted ? .green : .secondary)
+                .frame(width: 26, height: 26)
+                .background(
+                    (granted ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08)),
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(cap.title)
+                    .font(.subheadline.weight(.medium))
+                Text(cap.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            if granted {
+                Text("已授权")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.green)
+            } else if isPending {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button {
+                    pendingPermission = cap
+                    Task {
+                        _ = await PermissionManager.shared.grant(cap)
+                        permissionStatus = await PermissionManager.shared.status()
+                        pendingPermission = nil
+                    }
+                } label: {
+                    Text("去授权")
+                        .font(.caption.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
     private func detectAuthProfiles() {
         guard let json = loadOpenClawConfig(),
               let auth = json["auth"] as? [String: Any],
@@ -462,7 +569,18 @@ struct SettingsView: View {
         detectedProviders = providers
     }
 
-    private var detectedModels: [DetectedModel] {
+    /// Rebuild the model list from config and cache it for stable ordering.
+    private func refreshModelList() {
+        let fresh = buildDetectedModels()
+        // Only update if the model set actually changed (preserves order stability)
+        let freshIds = fresh.map(\.fullId)
+        let cachedIds = cachedModels.map(\.fullId)
+        if freshIds != cachedIds {
+            cachedModels = fresh
+        }
+    }
+
+    private func buildDetectedModels() -> [DetectedModel] {
         var modelIds = Set<String>()
         var models: [DetectedModel] = []
         var providersWithModels = Set<String>()
@@ -580,7 +698,7 @@ struct SettingsView: View {
     }
 
     private var openClawAttributionText: String {
-        "OpenClaw 随应用一同提供，相关许可证文件位于应用资源中的 openclaw/LICENSE。当前仓库内该文件标明 OpenClaw 使用 MIT License，并包含版权声明：Copyright (c) 2025 Peter Steinberger。根据该文件要求，相关版权与许可声明应随软件副本或其重要部分一同提供。"
+        "OpenClaw 随应用一同提供，相关许可证文件位于应用资源中的 openclaw/LICENSE。"
     }
 
     private func loadToolsProfile() {
@@ -656,5 +774,85 @@ struct SettingsView: View {
         }
 
         return nil
+    }
+}
+
+// MARK: - Appearance Section
+
+private struct AppearanceSection: View {
+    @Environment(\.themeColor) private var themeColor
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("外观")
+                    .font(.headline)
+                Spacer()
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("主题颜色")
+                        .font(.subheadline.weight(.medium))
+
+                    HStack(spacing: 10) {
+                        ForEach(ThemeManager.presets.indices, id: \.self) { index in
+                            let preset = ThemeManager.presets[index]
+                            Circle()
+                                .fill(preset)
+                                .frame(width: 26, height: 26)
+                                .overlay(
+                                    Circle()
+                                        .stroke(.white, lineWidth: 2)
+                                        .opacity(colorMatches(preset, themeColor) ? 1 : 0)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(preset.opacity(0.5), lineWidth: 2)
+                                        .scaleEffect(1.18)
+                                        .opacity(colorMatches(preset, themeColor) ? 1 : 0)
+                                )
+                                .onTapGesture {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        ThemeManager.shared.themeColor = preset
+                                    }
+                                }
+                                .contentShape(Circle())
+                        }
+
+                        Divider()
+                            .frame(height: 22)
+
+                        ColorPicker("", selection: Binding(
+                            get: { themeColor },
+                            set: { ThemeManager.shared.themeColor = $0 }
+                        ))
+                        .labelsHidden()
+                        .frame(width: 26, height: 26)
+                    }
+
+                    if !colorMatches(themeColor, ThemeManager.defaultColor) {
+                        Button("恢复默认") {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                ThemeManager.shared.reset()
+                            }
+                        }
+                        .font(.caption)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    /// Compare two SwiftUI Colors by converting to sRGB components
+    private func colorMatches(_ a: Color, _ b: Color) -> Bool {
+        guard let nsA = NSColor(a).usingColorSpace(.sRGB),
+              let nsB = NSColor(b).usingColorSpace(.sRGB) else { return false }
+        return abs(nsA.redComponent - nsB.redComponent) < 0.02
+            && abs(nsA.greenComponent - nsB.greenComponent) < 0.02
+            && abs(nsA.blueComponent - nsB.blueComponent) < 0.02
     }
 }

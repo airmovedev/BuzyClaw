@@ -1,0 +1,49 @@
+"app.name" = "BuzyClaw";
+"menu.open" = "Open BuzyClaw";
+"menu.quit" = "Quit";
+"usage_statistics" = "Usage Statistics";
+
+/* Voice Input */
+"voice.listening_hint" = "Start speaking...";
+"voice.recording_failed" = "Failed to start recording";
+"voice.unavailable" = "Speech recognition unavailable";
+
+/* Setup Guide - Common */
+"guide.setup.title" = "How to Get Started";
+"guide.setup.step1" = "Download BuzyClaw for Mac";
+"guide.setup.step2" = "Sign in with the same iCloud account";
+"guide.setup.step3" = "Launch the macOS app and start using";
+"guide.status.waiting" = "Waiting for Mac connection";
+"guide.status.retry" = "Retry";
+
+/* Setup Guide - Chat */
+"guide.chat.title" = "AI Conversations";
+"guide.chat.description" = "Chat with your AI agents from anywhere. Messages sync securely via iCloud.";
+"guide.chat.feature1" = "Send messages to AI agents on your Mac";
+"guide.chat.feature2" = "Real-time message sync via iCloud";
+"guide.chat.feature3" = "Share images with your AI agents";
+"guide.chat.input_hint" = "Connect your Mac to start chatting";
+"guide.chat.input_detail" = "Ensure BuzyClaw is running on your Mac with the same iCloud account";
+"guide.chat.ready" = "Ready to chat";
+"guide.chat.sync_hint" = "Messages sync via iCloud when your Mac is connected";
+
+/* Setup Guide - Dashboard */
+"guide.dashboard.title" = "Dashboard";
+"guide.dashboard.description" = "Overview of your projects, tasks, and AI agent status, updated in real-time from your Mac.";
+"guide.dashboard.feature1" = "Track project progress and stages";
+"guide.dashboard.feature2" = "View and manage task suggestions";
+"guide.dashboard.feature3" = "Monitor agent activity and token usage";
+
+/* Setup Guide - Cron Jobs */
+"guide.cron.title" = "Scheduled Tasks";
+"guide.cron.description" = "Set up recurring tasks for your AI agents. They run automatically, even when you're away.";
+"guide.cron.feature1" = "Configure flexible schedules";
+"guide.cron.feature2" = "Tasks repeat automatically";
+"guide.cron.feature3" = "Get notified when tasks complete";
+
+/* Setup Guide - Second Brain */
+"guide.brain.title" = "Second Brain";
+"guide.brain.description" = "Your AI's long-term memory. Knowledge that agents reference across conversations.";
+"guide.brain.feature1" = "Store persistent knowledge documents";
+"guide.brain.feature2" = "Agents learn and remember across sessions";
+"guide.brain.feature3" = "Organize by groups and categories";

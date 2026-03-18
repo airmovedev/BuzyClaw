@@ -1,9 +1,11 @@
+import MarkdownUI
 import SwiftUI
 
 struct AgentDetailView: View {
     let agentId: String
     let fallbackName: String
 
+    @Environment(\.themeColor) private var themeColor
     @Environment(DashboardSnapshotStore.self) private var snapshotStore
 
     init(agentId: String, fallbackName: String) {
@@ -41,19 +43,63 @@ struct AgentDetailView: View {
             }
 
             Section("AI 模型") {
-                VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("当前模型")
+                    Spacer()
                     Text(agent.resolvedWorkingModel ?? "未同步")
-                        .font(.body.weight(.medium))
-                        .textSelection(.enabled)
+                        .foregroundStyle(.secondary)
+                }
 
-                    let secondaryModelText = secondaryModelDescription
-                    if let secondaryModelText {
-                        Text(secondaryModelText)
-                            .font(.caption)
+                if let configuredModel = normalizedModel(agent.configuredModel),
+                   configuredModel != normalizedModel(agent.resolvedWorkingModel) {
+                    HStack {
+                        Text("配置模型")
+                        Spacer()
+                        Text(configuredModel)
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(.vertical, 2)
+
+                if let models = agent.availableModels, !models.isEmpty {
+                    NavigationLink {
+                        List(models, id: \.self) { model in
+                            HStack {
+                                Text(model)
+                                Spacer()
+                                if model == agent.resolvedWorkingModel {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(themeColor)
+                                }
+                            }
+                        }
+                        .navigationTitle("可用模型")
+                        .navigationBarTitleDisplayMode(.inline)
+                    } label: {
+                        HStack {
+                            Text("可用模型")
+                            Spacer()
+                            Text("\(models.count) 个")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if let files = agent.workspaceFiles, !files.isEmpty {
+                Section("Workspace 文档") {
+                    ForEach(files) { file in
+                        NavigationLink {
+                            WorkspaceFileDetailView(file: file)
+                        } label: {
+                            Label {
+                                Text(file.displayName)
+                            } icon: {
+                                Image(systemName: file.icon)
+                                    .foregroundStyle(themeColor)
+                            }
+                        }
+                    }
+                }
             }
         }
         .navigationTitle("Agent 详情")
@@ -61,22 +107,6 @@ struct AgentDetailView: View {
         .task {
             await snapshotStore.refresh()
         }
-    }
-
-    private var secondaryModelDescription: String? {
-        let configuredModel = normalizedModel(agent.configuredModel)
-        let currentModel = normalizedModel(agent.resolvedWorkingModel)
-        let displayModel = normalizedModel(agent.currentDisplayModel)
-
-        if let configuredModel, configuredModel != currentModel {
-            return "配置模型：\(configuredModel)"
-        }
-
-        if let displayModel, displayModel != currentModel {
-            return "展示模型：\(displayModel)"
-        }
-
-        return nil
     }
 
     private func normalizedModel(_ raw: String?) -> String? {
@@ -88,5 +118,29 @@ struct AgentDetailView: View {
         }
 
         return trimmed
+    }
+}
+
+// MARK: - Workspace File Detail View
+
+struct WorkspaceFileDetailView: View {
+    let file: AgentWorkspaceFile
+
+    var body: some View {
+        ScrollView {
+            if file.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                ContentUnavailableView {
+                    Label("文档为空", systemImage: file.icon)
+                } description: {
+                    Text("该文档暂无内容")
+                }
+            } else {
+                Markdown(file.content)
+                    .textSelection(.enabled)
+                    .padding()
+            }
+        }
+        .navigationTitle(file.displayName)
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct AgentFormSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.themeColor) private var themeColor
 
     @State var name: String = ""
     @State var emoji: String = "🤖"
@@ -90,7 +91,7 @@ struct AgentFormSheet: View {
             HStack(spacing: 8) {
                 ForEach(1...4, id: \.self) { step in
                     Capsule()
-                        .fill(step <= currentStep ? Color.accentColor : Color.secondary.opacity(0.2))
+                        .fill(step <= currentStep ? themeColor : Color.secondary.opacity(0.2))
                         .frame(height: 4)
                 }
             }
@@ -177,11 +178,11 @@ struct AgentFormSheet: View {
                         .padding(.vertical, 14)
                         .background(
                             RoundedRectangle(cornerRadius: 10)
-                                .fill(selectedStyle == style ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+                                .fill(selectedStyle == style ? themeColor.opacity(0.15) : Color.secondary.opacity(0.08))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(selectedStyle == style ? Color.accentColor : Color.clear, lineWidth: 2)
+                                .stroke(selectedStyle == style ? themeColor : Color.clear, lineWidth: 2)
                         )
                     }
                     .buttonStyle(.plain)
@@ -213,11 +214,11 @@ struct AgentFormSheet: View {
                             .padding(.vertical, 8)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .fill(selectedSkills.contains(skill) ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+                                    .fill(selectedSkills.contains(skill) ? themeColor.opacity(0.15) : Color.secondary.opacity(0.08))
                             )
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
-                                    .stroke(selectedSkills.contains(skill) ? Color.accentColor : Color.clear, lineWidth: 1.5)
+                                    .stroke(selectedSkills.contains(skill) ? themeColor : Color.clear, lineWidth: 1.5)
                             )
                     }
                     .buttonStyle(.plain)
@@ -256,17 +257,17 @@ struct AgentFormSheet: View {
                             Spacer()
                             if model == option {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.accentColor)
+                                    .foregroundStyle(themeColor)
                             }
                         }
                         .padding(12)
                         .background(
                             RoundedRectangle(cornerRadius: 10)
-                                .fill(model == option ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+                                .fill(model == option ? themeColor.opacity(0.15) : Color.secondary.opacity(0.08))
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: 10)
-                                .stroke(model == option ? Color.accentColor : Color.clear, lineWidth: 2)
+                                .stroke(model == option ? themeColor : Color.clear, lineWidth: 2)
                         )
                     }
                     .buttonStyle(.plain)

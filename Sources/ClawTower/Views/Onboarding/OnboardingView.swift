@@ -3,6 +3,7 @@ import AppKit
 
 struct OnboardingView: View {
     let appState: AppState
+    @Environment(\.themeColor) private var themeColor
 
     private enum AuthFlow: Hashable {
         case anthropicAPIKey
@@ -42,6 +43,11 @@ struct OnboardingView: View {
 
     @State private var skillsService = SkillsService()
     @State private var didLoadSkills = false
+    @State private var skillInstallErrors: [String: String] = [:]
+    @State private var skillEnvInputs: [String: [String: String]] = [:]  // skillName -> { envKey: value }
+    @State private var expandedSkills: Set<String> = []
+    @State private var skillTerminalCommands: [String: String] = [:]  // skillName -> terminal command to run
+    @State private var userToggledSkills: Set<String> = []  // tracks skills the user explicitly toggled
 
     @State private var existingInstallDetected = false
     @State private var existingAuthDetected = false
@@ -203,6 +209,7 @@ struct OnboardingView: View {
                         )
                         try? generator.generate()
                     }
+                    skillsService.persistChangedSkillStates(userToggledSkills)
                     appState.completeOnboarding()
                 }
             }
@@ -370,6 +377,7 @@ struct OnboardingView: View {
         didLoadSkills = true
         skillsService.configure(configDirectory: appState.openclawBasePath)
         await skillsService.loadSkills()
+        skillsService.disableAllSkills()
     }
 
     // MARK: - Step 0: Welcome
@@ -411,9 +419,9 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: icon)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(themeColor)
                 .frame(width: 34, height: 34)
-                .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .background(themeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
             Text(title)
                 .font(.subheadline.weight(.semibold))
@@ -471,7 +479,7 @@ struct OnboardingView: View {
                     } else {
                         Image(systemName: "sparkles")
                             .font(.system(size: 52))
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(themeColor)
                         Text("这是一次全新配置")
                             .font(.title2.bold())
                         Text("我们会帮你搭好一套新的本地 AI 工作台，几步走完就能开始用。")
@@ -701,7 +709,7 @@ struct OnboardingView: View {
                         if isSelected {
                             Image(systemName: "checkmark.circle.fill")
                                 .font(.system(size: 12))
-                                .foregroundStyle(Color.accentColor)
+                                .foregroundStyle(themeColor)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -891,6 +899,8 @@ struct OnboardingView: View {
             .padding(.vertical, 4)
         }
         .task {
+            // Delay skill loading so the step transition animation finishes first
+            try? await Task.sleep(for: .milliseconds(400))
             await ensureSkillsLoaded()
         }
     }
@@ -958,47 +968,362 @@ struct OnboardingView: View {
     }
 
     private func onboardingSkillRow(_ skill: Skill) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 10) {
-                Text(skill.displayEmoji)
-                    .font(.system(size: 20))
-                    .frame(width: 28, alignment: .leading)
+        let isInstalling = skillsService.installingSkills.contains(skill.name)
+        let installError = skillInstallErrors[skill.name]
+        let canToggle = skill.canBeToggledInOnboarding
+        let isOn = !skill.disabled
+        let isExpanded = expandedSkills.contains(skill.name)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(skill.name)
-                        .font(.system(size: 14, weight: .semibold))
+        return VStack(alignment: .leading, spacing: 0) {
+            // Main row: emoji + name + badge + toggle
+            HStack(alignment: .center, spacing: 12) {
+                HStack(spacing: 10) {
+                    Text(skill.displayEmoji)
+                        .font(.system(size: 20))
+                        .frame(width: 28, alignment: .leading)
 
-                    if let description = skill.description {
-                        Text(description)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(skill.name)
+                                .font(.system(size: 14, weight: .semibold))
+
+                            if !skill.eligible && skill.canBeToggledInOnboarding && skill.disabled {
+                                skillRequirementBadge(skill)
+                            }
+                        }
+
+                        if let description = skill.description {
+                            Text(description)
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            Toggle("", isOn: Binding(
-                get: { !skill.disabled },
-                set: { newValue in
-                    skillsService.setSkillEnabled(name: skill.name, enabled: newValue)
+                // Toggle is always visible — install runs in background
+                Toggle("", isOn: Binding(
+                    get: { isOn },
+                    set: { newValue in
+                        handleSkillToggle(skill: skill, enabled: newValue)
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .scaleEffect(0.88)
+                .disabled(!canToggle)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+
+            // Install progress bar (non-blocking, shown below the main row)
+            if isInstalling {
+                VStack(alignment: .leading, spacing: 6) {
+                    Divider()
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(skillsService.installStatusMessage[skill.name] ?? "安装中…")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    ProgressView(value: skillsService.installProgress[skill.name] ?? 0)
+                        .progressViewStyle(.linear)
+                        .tint(themeColor)
                 }
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .scaleEffect(0.88)
-            .disabled(!skill.canBeEnabled)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Expanded detail section (env var inputs, install actions, config hints)
+            if isOn && isExpanded && !isInstalling {
+                skillExpandedSection(skill)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            // Terminal fallback
+            if let terminalCommand = skillTerminalCommands[skill.name] {
+                VStack(alignment: .leading, spacing: 8) {
+                    Divider()
+                    HStack(spacing: 6) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
+                        Text("需要在终端中输入密码完成安装")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Text("点击下方按钮后，终端会打开并自动运行安装命令。终端中出现 Password 提示时，请输入你的 Mac 登录密码（输入时不会显示任何字符，这是正常的），然后按回车。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            skillsService.openTerminalWithCommand(terminalCommand)
+                            skillTerminalCommands.removeValue(forKey: skill.name)
+                        } label: {
+                            Label("打开终端并安装", systemImage: "terminal")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        Button {
+                            skillTerminalCommands.removeValue(forKey: skill.name)
+                            skillsService.setSkillEnabled(name: skill.name, enabled: false)
+                            expandedSkills.remove(skill.name)
+                        } label: {
+                            Text("跳过")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+            }
+
+            // Error message
+            if let installError, skillTerminalCommands[skill.name] == nil {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                    Text(installError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                        .lineLimit(3)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
+            }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
+        .animation(.easeInOut(duration: 0.2), value: isExpanded)
+        .animation(.easeInOut(duration: 0.2), value: isOn)
+        .animation(.easeInOut(duration: 0.2), value: isInstalling)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(skill.canBeEnabled ? Color.secondary.opacity(0.12) : Color.orange.opacity(0.26), lineWidth: 1)
+                .stroke(canToggle ? Color.secondary.opacity(0.12) : Color.secondary.opacity(0.06), lineWidth: 1)
         )
+    }
+
+    @ViewBuilder
+    private func skillRequirementBadge(_ skill: Skill) -> some View {
+        if skill.needsBinInstall && skill.needsEnvConfig {
+            skillBadge("需安装 + 配置", color: .orange)
+        } else if skill.needsBinInstall {
+            skillBadge("需安装依赖", color: .orange)
+        } else if skill.needsEnvConfig {
+            skillBadge("需填写密钥", color: .blue)
+        } else if skill.needsAppConfig {
+            skillBadge("需配置", color: .purple)
+        }
+    }
+
+    private func skillBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    private func handleSkillToggle(skill: Skill, enabled: Bool) {
+        skillInstallErrors.removeValue(forKey: skill.name)
+        skillTerminalCommands.removeValue(forKey: skill.name)
+        userToggledSkills.insert(skill.name)
+
+        if enabled {
+            // Turn ON: enable in config, then decide whether to expand
+            skillsService.setSkillEnabled(name: skill.name, enabled: true)
+
+            let needsSetup = !skill.eligible && (skill.needsBinInstall || skill.needsEnvConfig || skill.needsAppConfig)
+            if needsSetup {
+                // Initialize env input fields
+                if skill.needsEnvConfig {
+                    var inputs: [String: String] = [:]
+                    for key in skill.missing.env {
+                        inputs[key] = skillEnvInputs[skill.name]?[key] ?? ""
+                    }
+                    skillEnvInputs[skill.name] = inputs
+                }
+                expandedSkills.insert(skill.name)
+
+                // Auto-install bins if needed (no env/config required)
+                if skill.needsBinInstall && !skill.needsEnvConfig && !skill.needsAppConfig {
+                    triggerSkillInstall(skill.name)
+                }
+            }
+        } else {
+            // Turn OFF
+            skillsService.setSkillEnabled(name: skill.name, enabled: false)
+            expandedSkills.remove(skill.name)
+        }
+    }
+
+    private func triggerSkillInstall(_ name: String) {
+        skillInstallErrors.removeValue(forKey: name)
+        skillTerminalCommands.removeValue(forKey: name)
+        Task {
+            let result = await skillsService.installSkillDependencies(name: name)
+            switch result {
+            case .success:
+                expandedSkills.remove(name)
+            case .failed(let message):
+                skillInstallErrors[name] = message
+            case .needsTerminal(let command, _):
+                skillTerminalCommands[name] = command
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func skillExpandedSection(_ skill: Skill) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+                .padding(.bottom, 2)
+
+            // 1) Binary install section
+            if skill.needsBinInstall {
+                skillBinInstallSection(skill)
+            }
+
+            // 2) Environment variable inputs
+            if skill.needsEnvConfig {
+                skillEnvSection(skill)
+            }
+
+            // 3) App config hints
+            if skill.needsAppConfig {
+                skillConfigHintSection(skill)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func skillBinInstallSection(_ skill: Skill) -> some View {
+        let isInstalling = skillsService.installingSkills.contains(skill.name)
+        let allBins = skill.missing.bins + skill.missing.anyBins
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("需要安装：\(allBins.joined(separator: ", "))")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            if !isInstalling && skillTerminalCommands[skill.name] == nil {
+                Button {
+                    triggerSkillInstall(skill.name)
+                } label: {
+                    Label("安装", systemImage: "arrow.down.circle")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func skillEnvSection(_ skill: Skill) -> some View {
+        let inputs = skillEnvInputs[skill.name] ?? [:]
+
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(skill.missing.env, id: \.self) { envKey in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(envKey)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+
+                    HStack(spacing: 8) {
+                        TextField("填写 \(friendlyEnvName(envKey))", text: Binding(
+                            get: { inputs[envKey] ?? "" },
+                            set: { newValue in
+                                skillEnvInputs[skill.name, default: [:]][envKey] = newValue
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+
+            let allFilled = skill.missing.env.allSatisfy { !(inputs[$0] ?? "").trimmingCharacters(in: .whitespaces).isEmpty }
+
+            Button {
+                let trimmed = inputs.mapValues { $0.trimmingCharacters(in: .whitespaces) }
+                skillsService.setSkillEnvVars(name: skill.name, envVars: trimmed)
+
+                if skill.needsBinInstall {
+                    triggerSkillInstall(skill.name)
+                } else {
+                    expandedSkills.remove(skill.name)
+                }
+            } label: {
+                Label(skill.needsBinInstall ? "保存并安装" : "保存", systemImage: "checkmark.circle")
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!allFilled)
+        }
+    }
+
+    @ViewBuilder
+    private func skillConfigHintSection(_ skill: Skill) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("此技能需要额外配置才能使用：")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            ForEach(skill.missing.config, id: \.self) { configKey in
+                Text("• \(friendlyConfigName(configKey))")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("开启后，可在设置中完成配置。")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func friendlyEnvName(_ key: String) -> String {
+        if key.hasSuffix("_API_KEY") || key.hasSuffix("_TOKEN") {
+            return "API 密钥"
+        }
+        if key.contains("DIR") || key.contains("PATH") {
+            return "路径"
+        }
+        return "值"
+    }
+
+    private func friendlyConfigName(_ key: String) -> String {
+        if key.hasPrefix("channels.") {
+            let channel = key.replacingOccurrences(of: "channels.", with: "")
+                .replacingOccurrences(of: ".token", with: "")
+            return "连接 \(channel.capitalized) 频道"
+        }
+        if key.hasPrefix("plugins.entries.") {
+            let plugin = key.replacingOccurrences(of: "plugins.entries.", with: "")
+                .replacingOccurrences(of: ".enabled", with: "")
+            return "启用 \(plugin) 插件"
+        }
+        return key
     }
 
     // MARK: - Setup Token Section
@@ -1128,9 +1453,9 @@ struct OnboardingView: View {
 
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(themeColor)
                         Text("请选择你要使用的模型")
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(themeColor)
                     }
                     .font(.caption)
                 }
@@ -1144,9 +1469,26 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("输入 MiniMax API Key")
                 .font(.headline)
-            Text("可在 platform.minimaxi.com 获取。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+
+            HStack(spacing: 4) {
+                Text("可在")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button {
+                    if let url = URL(string: "https://platform.minimaxi.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text("platform.minimaxi.com")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                Text("获取。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
             authInputRow(
                 placeholder: "粘贴你的 API Key",
@@ -1247,9 +1589,26 @@ struct OnboardingView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("输入 Moonshot API Key")
                 .font(.headline)
-            Text("可在 platform.moonshot.cn 获取。")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+
+            HStack(spacing: 4) {
+                Text("可在")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button {
+                    if let url = URL(string: "https://platform.moonshot.cn") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Text("platform.moonshot.cn")
+                        .font(.callout)
+                        .foregroundStyle(themeColor)
+                        .underline()
+                }
+                .buttonStyle(.plain)
+                Text("获取。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
             authInputRow(
                 placeholder: "粘贴你的 API Key",
@@ -1358,9 +1717,9 @@ struct OnboardingView: View {
             case .modelSelection:
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(themeColor)
                     Text("请选择你要使用的模型")
-                        .foregroundStyle(.blue)
+                        .foregroundStyle(themeColor)
                 }
                 .font(.caption)
             case .error(let message):
@@ -1502,7 +1861,7 @@ struct OnboardingView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     sectionIntro(title: "打开关键系统权限", description: "不开也能用，但如果你希望它真的替你干活，这几项最好开上。")
 
-                    VStack(spacing: 12) {
+                    VStack(spacing: 6) {
                         ForEach(PermissionCapability.allCases) { cap in
                             permissionRow(cap)
                         }
@@ -1528,25 +1887,36 @@ struct OnboardingView: View {
         .task {
             permissionStatus = await PermissionManager.shared.status()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task {
+                // First check after a short delay
+                try? await Task.sleep(for: .milliseconds(500))
+                permissionStatus = await PermissionManager.shared.status()
+                // Second check after a longer delay to catch slow TCC propagation
+                try? await Task.sleep(for: .seconds(1))
+                permissionStatus = await PermissionManager.shared.status()
+            }
+        }
     }
 
     private func permissionRow(_ cap: PermissionCapability) -> some View {
         let granted = permissionStatus[cap] ?? false
         let isPending = pendingPermission == cap
 
-        return HStack(spacing: 14) {
+        return HStack(spacing: 10) {
             Image(systemName: cap.icon)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(granted ? .green : .secondary)
-                .frame(width: 42, height: 42)
-                .background((granted ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08)), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .frame(width: 30, height: 30)
+                .background((granted ? Color.green.opacity(0.12) : Color.secondary.opacity(0.08)), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(cap.title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.medium))
                 Text(cap.subtitle)
-                    .font(.callout)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Spacer()
@@ -1556,25 +1926,31 @@ struct OnboardingView: View {
             } else if isPending {
                 ProgressView()
                     .controlSize(.small)
-                    .frame(width: 96, height: 40)
+                    .frame(width: 64, height: 28)
             } else {
-                largeActionButton(title: "去授权", icon: "arrow.up.forward.app", prominence: .primary) {
+                Button {
                     pendingPermission = cap
                     Task {
                         _ = await PermissionManager.shared.grant(cap)
-                        try? await Task.sleep(for: .seconds(1))
                         permissionStatus = await PermissionManager.shared.status()
                         pendingPermission = nil
                     }
+                } label: {
+                    Text("去授权")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(themeColor, in: Capsule())
                 }
-                .frame(width: 128)
+                .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-        .background((granted ? Color.green.opacity(0.05) : Color(nsColor: .controlBackgroundColor)), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background((granted ? Color.green.opacity(0.05) : Color(nsColor: .controlBackgroundColor)), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(granted ? Color.green.opacity(0.24) : Color.secondary.opacity(0.12), lineWidth: 1)
         )
     }
@@ -1755,21 +2131,21 @@ struct OnboardingView: View {
 
     private func selectionBackground(_ isSelected: Bool) -> some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(isSelected ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+            .fill(isSelected ? themeColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(isSelected ? Color.accentColor.opacity(0.75) : Color.secondary.opacity(0.12), lineWidth: isSelected ? 1.5 : 1)
+                    .stroke(isSelected ? themeColor.opacity(0.75) : Color.secondary.opacity(0.12), lineWidth: isSelected ? 1.5 : 1)
             )
     }
 
     private func selectionIndicator(isSelected: Bool) -> some View {
         ZStack {
             Circle()
-                .stroke(isSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 2)
+                .stroke(isSelected ? themeColor : Color.secondary.opacity(0.35), lineWidth: 2)
                 .frame(width: 18, height: 18)
             if isSelected {
                 Circle()
-                    .fill(Color.accentColor)
+                    .fill(themeColor)
                     .frame(width: 8, height: 8)
             }
         }
@@ -1798,7 +2174,7 @@ struct OnboardingView: View {
         case secondary
     }
 
-    private func largeActionButton(title: String, icon: String, prominence: ButtonProminence, tint: Color = .accentColor, height: CGFloat = 42, action: @escaping () -> Void) -> some View {
+    private func largeActionButton(title: String, icon: String, prominence: ButtonProminence, tint: Color = ThemeManager.shared.themeColor, height: CGFloat = 42, action: @escaping () -> Void) -> some View {
         Group {
             if prominence == .primary {
                 Button(action: action) {
@@ -1942,6 +2318,8 @@ struct OnboardingView: View {
     }
 
     private struct ArrowNavigationButton: View {
+    @Environment(\.themeColor) private var themeColor
+
     enum Direction {
         case back
         case forward
@@ -1970,11 +2348,11 @@ struct OnboardingView: View {
                 .frame(width: size, height: size)
                 .background(
                     Circle()
-                        .fill(disabled ? Color.secondary.opacity(0.05) : (isForwardHighlight ? Color.accentColor : Color(nsColor: .controlBackgroundColor).opacity(0.82)))
+                        .fill(disabled ? Color.secondary.opacity(0.05) : (isForwardHighlight ? themeColor : Color(nsColor: .controlBackgroundColor).opacity(0.82)))
                 )
                 .overlay(
                     Circle()
-                        .stroke(disabled ? Color.secondary.opacity(0.08) : (isForwardHighlight ? Color.accentColor.opacity(0.82) : Color.primary.opacity(0.08)), lineWidth: 1)
+                        .stroke(disabled ? Color.secondary.opacity(0.08) : (isForwardHighlight ? themeColor.opacity(0.82) : Color.primary.opacity(0.08)), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(disabled ? 0 : (isForwardHighlight ? 0.10 : 0.03)), radius: isForwardHighlight ? 10 : 6, y: 3)
         }

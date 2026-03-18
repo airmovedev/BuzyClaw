@@ -1,0 +1,49 @@
+"app.name" = "蝦忙";
+"menu.open" = "打開蝦忙";
+"menu.quit" = "退出";
+"usage_statistics" = "用量統計";
+
+/* Voice Input */
+"voice.listening_hint" = "請開始說話...";
+"voice.recording_failed" = "錄音啟動失敗";
+"voice.unavailable" = "語音辨識不可用";
+
+/* Setup Guide - Common */
+"guide.setup.title" = "如何開始使用";
+"guide.setup.step1" = "在 Mac 上下載蝦忙";
+"guide.setup.step2" = "登入同一個 iCloud 帳號";
+"guide.setup.step3" = "打開 macOS 端，即刻開始";
+"guide.status.waiting" = "等待連接電腦端";
+"guide.status.retry" = "重試";
+
+/* Setup Guide - Chat */
+"guide.chat.title" = "AI 對話";
+"guide.chat.description" = "隨時隨地與 AI 助手對話，訊息透過 iCloud 安全同步。";
+"guide.chat.feature1" = "向 Mac 上的 AI Agent 傳送訊息";
+"guide.chat.feature2" = "訊息透過 iCloud 即時同步";
+"guide.chat.feature3" = "向 AI Agent 分享圖片";
+"guide.chat.input_hint" = "連接 Mac 即可開始對話";
+"guide.chat.input_detail" = "確保 Mac 上的蝦忙已打開，且登入同一 iCloud 帳號";
+"guide.chat.ready" = "準備就緒";
+"guide.chat.sync_hint" = "Mac 連接後，訊息透過 iCloud 同步";
+
+/* Setup Guide - Dashboard */
+"guide.dashboard.title" = "看板";
+"guide.dashboard.description" = "總覽專案、任務和 AI Agent 狀態，從 Mac 即時同步。";
+"guide.dashboard.feature1" = "追蹤專案進度和階段";
+"guide.dashboard.feature2" = "查看和管理任務建議";
+"guide.dashboard.feature3" = "監控 Agent 活動和用量";
+
+/* Setup Guide - Cron Jobs */
+"guide.cron.title" = "定時任務";
+"guide.cron.description" = "為 AI Agent 設定週期性任務，自動執行，無需守在電腦旁。";
+"guide.cron.feature1" = "配置靈活的定時計畫";
+"guide.cron.feature2" = "任務自動循環執行";
+"guide.cron.feature3" = "任務完成時收到通知";
+
+/* Setup Guide - Second Brain */
+"guide.brain.title" = "第二大腦";
+"guide.brain.description" = "AI 的長期記憶，Agent 可在對話中隨時參考的知識庫。";
+"guide.brain.feature1" = "儲存持久化的知識文件";
+"guide.brain.feature2" = "Agent 跨會話學習和記憶";
+"guide.brain.feature3" = "按分組和類別整理";

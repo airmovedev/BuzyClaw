@@ -62,6 +62,71 @@ final class TaskManager {
         await saveTasks()
     }
 
+    /// Add a task linked to a subagent session key, with inProgress status.
+    func addSubagentTask(title: String, sessionKey: String, parentTaskId: String? = nil) async {
+        // Avoid duplicates: if a task with this source already exists, skip
+        guard !tasks.contains(where: { $0.source == sessionKey }) else { return }
+        let now = Date()
+        let newTask = TaskItem(
+            title: title,
+            status: .inProgress,
+            priority: .medium,
+            source: sessionKey,
+            context: "",
+            parentTaskId: parentTaskId,
+            createdAt: now,
+            updatedAt: now
+        )
+        tasks.insert(newTask, at: 0)
+        await saveTasks()
+    }
+
+    func findMatchingParentTask(subagentTitle: String) -> String? {
+        let trimmed = subagentTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let coreTitle = trimmed.replacingFirstMatch(
+            pattern: #"^[A-Za-z][A-Za-z0-9 _-]*\s*:\s*"#,
+            with: ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !coreTitle.isEmpty else { return nil }
+
+        return tasks
+            .filter { $0.source == "ClawTower" }
+            .filter { $0.status == .todo || $0.status == .inProgress }
+            .filter { $0.title.localizedCaseInsensitiveContains(coreTitle) }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .first?
+            .id
+    }
+
+    /// Mark a subagent-linked task as inReview and update its context with a summary.
+    func completeSubagentTask(sessionKey: String, summary: String) async {
+        guard let index = tasks.firstIndex(where: { $0.source == sessionKey }) else { return }
+        guard tasks[index].status == .inProgress else { return }
+
+        let now = Date()
+        let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parentTaskId = tasks[index].parentTaskId
+
+        tasks[index].status = .inReview
+        tasks[index].updatedAt = now
+        if !trimmedSummary.isEmpty {
+            tasks[index].context = trimmedSummary
+        }
+
+        if !trimmedSummary.isEmpty,
+           let parentTaskId,
+           let parentIndex = tasks.firstIndex(where: { $0.id == parentTaskId }) {
+            tasks[parentIndex].context = trimmedSummary
+            tasks[parentIndex].status = .inReview
+            tasks[parentIndex].updatedAt = now
+        }
+
+        await saveTasks()
+    }
+
     func updateTaskStatus(taskID: String, newStatus: TaskItem.Status) async {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
         guard tasks[index].status != newStatus else { return }
@@ -74,6 +139,16 @@ final class TaskManager {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
         guard tasks[index].priority != newPriority else { return }
         tasks[index].priority = newPriority
+        tasks[index].updatedAt = Date()
+        await saveTasks()
+    }
+
+    func updateTask(taskID: String, title: String, priority: TaskItem.Priority, status: TaskItem.Status, context: String) async {
+        guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
+        tasks[index].title = title
+        tasks[index].priority = priority
+        tasks[index].status = status
+        tasks[index].context = context
         tasks[index].updatedAt = Date()
         await saveTasks()
     }
@@ -163,5 +238,20 @@ final class TaskManager {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".openclaw", isDirectory: true)
             .appendingPathComponent("tasks.json", isDirectory: false)
+    }
+}
+
+private extension String {
+    func replacingFirstMatch(pattern: String, with replacement: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return self }
+        let range = NSRange(startIndex..., in: self)
+        guard let match = regex.firstMatch(in: self, range: range),
+              let matchRange = Range(match.range, in: self) else {
+            return self
+        }
+
+        var value = self
+        value.replaceSubrange(matchRange, with: replacement)
+        return value
     }
 }

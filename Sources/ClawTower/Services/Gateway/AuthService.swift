@@ -82,6 +82,43 @@ final class AuthService {
         UserDefaults.standard.removeObject(forKey: "apiKey")
     }
 
+    /// Re-ensures the stored API key (from UserDefaults) is present in auth-profiles.json.
+    /// Called on every Gateway launch to guard against the Gateway runtime overwriting the file.
+    nonisolated static func ensureAuthProfilesUpToDate(homeDir: String) {
+        guard let raw = UserDefaults.standard.string(forKey: "selectedProvider"),
+              let provider = Provider(rawValue: raw),
+              let apiKey = UserDefaults.standard.string(forKey: "apiKey"),
+              !apiKey.isEmpty else { return }
+
+        do {
+            switch provider {
+            case .anthropic:
+                try persistAnthropicApiKeyProfile(apiKey: apiKey, homeDir: homeDir)
+            case .kimi:
+                try persistMoonshotApiKeyProfile(apiKey: apiKey, homeDir: homeDir)
+            case .minimax:
+                if apiKey == "oauth" {
+                    // OAuth flow — re-persist handled by the OAuth token refresh path,
+                    // not by the API key profile writer.
+                    break
+                }
+                try persistMinimaxApiKeyProfile(apiKey: apiKey, homeDir: homeDir)
+            case .zai, .google, .xai, .openrouter:
+                try persistGenericApiKeyProfile(provider: provider, apiKey: apiKey, homeDir: homeDir)
+            case .qwen:
+                if let modelId = UserDefaults.standard.string(forKey: "selectedQwenModelId"), !modelId.isEmpty {
+                    try persistQwenProfile(apiKey: apiKey, modelId: modelId, homeDir: homeDir)
+                } else {
+                    try persistGenericApiKeyProfile(provider: provider, apiKey: apiKey, homeDir: homeDir)
+                }
+            case .openai:
+                break // OAuth flow handles its own persistence
+            }
+        } catch {
+            print("[AuthService] ⚠️ Failed to re-ensure auth profile: \(error)")
+        }
+    }
+
     // MARK: - Public API
 
     func verifyKey(provider: Provider, apiKey: String) {
@@ -115,13 +152,22 @@ final class AuthService {
                 guard !Task.isCancelled else { return }
 
                 if valid {
-                    // Persist to openclaw.json + auth-profiles.json for providers that need it
+                    // Persist to openclaw.json + auth-profiles.json
                     let resolvedHome = FileManager.default.homeDirectoryForCurrentUser.path
                     switch provider {
                     case .anthropic:
                         try Self.persistAnthropicApiKeyProfile(apiKey: apiKey, homeDir: resolvedHome)
-                    default:
-                        break // Other providers have their own dedicated persist methods
+                    case .kimi:
+                        try Self.persistMoonshotApiKeyProfile(apiKey: apiKey, homeDir: resolvedHome)
+                    case .minimax:
+                        try Self.persistMinimaxApiKeyProfile(apiKey: apiKey, homeDir: resolvedHome)
+                    case .zai, .google, .xai, .openrouter:
+                        try Self.persistGenericApiKeyProfile(provider: provider, apiKey: apiKey, homeDir: resolvedHome)
+                    case .qwen:
+                        // Qwen persists via persistQwenWithSelectedModel after model selection
+                        break
+                    case .openai:
+                        break // OpenAI uses OAuth
                     }
                     saveKey(provider: provider, apiKey: apiKey)
                     state = .verified
@@ -1120,6 +1166,7 @@ final class AuthService {
             "baseUrl": baseUrl,
             "apiKey": "minimax-oauth",
             "api": "anthropic-messages",
+            "authHeader": true,
             "models": [
                 [
                     "id": "MiniMax-M2.5",
@@ -1252,6 +1299,7 @@ final class AuthService {
         providers["minimax"] = [
             "baseUrl": "https://api.minimax.io/anthropic",
             "api": "anthropic-messages",
+            "authHeader": true,
             "models": [[
                 "id": "MiniMax-M2.5",
                 "name": "MiniMax M2.5",
@@ -1705,6 +1753,7 @@ final class AuthService {
         do {
             try Self.persistQwenProfile(apiKey: apiKey, modelId: modelId, homeDir: resolvedHome)
             saveKey(provider: .qwen, apiKey: apiKey)
+            UserDefaults.standard.set(modelId, forKey: "selectedQwenModelId")
             state = .verified
         } catch {
             state = .error(error.localizedDescription)

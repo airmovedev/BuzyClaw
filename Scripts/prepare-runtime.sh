@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RUNTIME_DIR="$PROJECT_DIR/Resources/runtime"
 DEST="$RUNTIME_DIR/openclaw"
-PINNED_OPENCLAW_VERSION="2026.3.12"
+PINNED_OPENCLAW_VERSION="2026.3.13"
 
 # Accept explicit path, or auto-detect from npm global prefix
 if [ -n "${1:-}" ]; then
@@ -28,7 +28,14 @@ read_package_version() {
     local dir="$1"
 
     if [ -f "$dir/package.json" ]; then
-        node -e "console.log(require('$dir/package.json').version)" 2>/dev/null || echo "unknown"
+        # Use bundled node if available, otherwise python3 (always present in Xcode build env)
+        if [ -x "$RUNTIME_DIR/node" ]; then
+            "$RUNTIME_DIR/node" -e "console.log(require('$dir/package.json').version)" 2>/dev/null || echo "unknown"
+        elif command -v python3 &>/dev/null; then
+            python3 -c "import json; print(json.load(open('$dir/package.json'))['version'])" 2>/dev/null || echo "unknown"
+        else
+            echo "unknown"
+        fi
     else
         echo "missing"
     fi
@@ -114,8 +121,24 @@ print_status() {
 print_status
 
 if [ "$bundled_compare_status" -eq 0 ]; then
-    echo "✅ Using bundled runtime as-is"
-    echo "   Reason: bundled runtime already satisfies the pinned version; source/runtime installed on host is informational only."
+    # Even when the version matches, the source may have additional packages
+    # (e.g. new transitive dependencies added after the initial sync).
+    # Do an additive sync (no --delete) so missing packages get filled in.
+    if [ -d "$SOURCE" ] && [ "$source_compare_status" -eq 0 ]; then
+        BUNDLED_PKG_COUNT="$(ls "$DEST/node_modules/" 2>/dev/null | wc -l | tr -d ' ')"
+        SOURCE_PKG_COUNT="$(ls "$SOURCE/node_modules/" 2>/dev/null | wc -l | tr -d ' ')"
+        if [ "$SOURCE_PKG_COUNT" -gt "$BUNDLED_PKG_COUNT" ]; then
+            echo "🔄 Syncing missing packages from source (bundled: $BUNDLED_PKG_COUNT, source: $SOURCE_PKG_COUNT)"
+            rsync -a "$SOURCE/node_modules/" "$DEST/node_modules/"
+            echo "   ✅ Packages synced"
+        else
+            echo "✅ Using bundled runtime as-is"
+            echo "   Reason: bundled runtime already satisfies the pinned version; source/runtime installed on host is informational only."
+        fi
+    else
+        echo "✅ Using bundled runtime as-is"
+        echo "   Reason: bundled runtime already satisfies the pinned version; source/runtime installed on host is informational only."
+    fi
 else
     if [ -d "$SOURCE" ]; then
         echo "📦 Syncing bundled runtime from source"

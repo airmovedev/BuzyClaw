@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import os.log
 
 struct ModelUsageInfo: Sendable, Codable {
@@ -541,6 +542,16 @@ final class GatewayClient: Sendable {
         _ = try await toolsInvoke(tool: "cron", args: ["action": "update", "jobId": jobId, "patch": ["enabled": enabled]])
     }
 
+    func cronUpdateJob(jobId: String, name: String, agentId: String, schedule: [String: Any], payload: [String: Any]) async throws {
+        let patch: [String: Any] = [
+            "name": name,
+            "agent": agentId,
+            "schedule": schedule,
+            "payload": payload
+        ]
+        _ = try await toolsInvoke(tool: "cron", args: ["action": "update", "jobId": jobId, "patch": patch])
+    }
+
     func cronDeleteJob(jobId: String) async throws {
         _ = try await toolsInvoke(tool: "cron", args: ["action": "remove", "jobId": jobId])
     }
@@ -570,6 +581,275 @@ final class GatewayClient: Sendable {
            let parsed = try? JSONSerialization.jsonObject(with: textData) as? [String: Any],
            let runs = parsed["runs"] as? [[String: Any]] { return runs }
         return []
+    }
+
+    // MARK: - Usage Statistics
+
+    /// Fetches aggregated token usage via direct WebSocket RPC to the running Gateway.
+    /// Much faster than spawning a CLI process since it reuses the existing Gateway.
+    func fetchSessionsUsage(days: Int) async throws -> [String: Any] {
+        let calendar = Calendar.current
+        let endDate = Date()
+        let startDate = calendar.date(byAdding: .day, value: -days, to: endDate)!
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let startStr = formatter.string(from: startDate)
+        let endStr = formatter.string(from: endDate)
+
+        let params: [String: Any] = [
+            "startDate": startStr,
+            "endDate": endStr,
+            "limit": 200
+        ]
+        return try await gatewayRPC(method: "sessions.usage", params: params, timeout: 30)
+    }
+
+    // MARK: - Gateway WebSocket RPC
+
+    /// Loads device identity from ~/.openclaw/identity/device.json for WebSocket auth.
+    private struct DeviceIdentity {
+        let deviceId: String
+        let publicKeyPem: String
+        let privateKeyPem: String
+
+        /// Raw 32-byte Ed25519 public key extracted from SPKI PEM.
+        var rawPublicKeyBase64Url: String? {
+            // Parse PEM → extract base64 content → decode to SPKI DER
+            let lines = publicKeyPem.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+            let base64Str = lines.joined()
+            guard let spkiData = Data(base64Encoded: base64Str) else { return nil }
+            // Ed25519 SPKI is 44 bytes: 12-byte prefix + 32-byte raw key
+            if spkiData.count == 44 {
+                let rawKey = spkiData.suffix(32)
+                return rawKey.base64UrlEncoded
+            }
+            return spkiData.base64UrlEncoded
+        }
+
+        /// Signs a payload string with Ed25519.
+        func sign(_ payload: String) -> String? {
+            // Parse PEM → extract base64 content → decode to PKCS8 DER
+            let lines = privateKeyPem.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.hasPrefix("-----") && !$0.isEmpty }
+            let base64Str = lines.joined()
+            guard let pkcs8Data = Data(base64Encoded: base64Str) else { return nil }
+            // Ed25519 PKCS8 is 48 bytes: 16-byte prefix + 32-byte seed
+            guard pkcs8Data.count == 48 else { return nil }
+            let seed = pkcs8Data.suffix(32)
+            guard let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: seed) else { return nil }
+            guard let payloadData = payload.data(using: .utf8) else { return nil }
+            guard let signature = try? key.signature(for: payloadData) else { return nil }
+            return Data(signature).base64UrlEncoded
+        }
+
+        /// Loads existing device identity or creates a new one (matching OpenClaw's behavior).
+        static func loadOrCreate() -> DeviceIdentity? {
+            let home = FileManager.default.homeDirectoryForCurrentUser
+            let path = home.appendingPathComponent(".openclaw/identity/device.json")
+
+            // Try loading existing identity
+            if let data = try? Data(contentsOf: path),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               json["version"] as? Int == 1,
+               let deviceId = json["deviceId"] as? String,
+               let pubKey = json["publicKeyPem"] as? String,
+               let privKey = json["privateKeyPem"] as? String {
+                return DeviceIdentity(deviceId: deviceId, publicKeyPem: pubKey, privateKeyPem: privKey)
+            }
+
+            // Generate new Ed25519 key pair
+            let privateKey = Curve25519.Signing.PrivateKey()
+            let publicKey = privateKey.publicKey
+
+            // Build PEM strings matching OpenClaw's format
+            // SPKI = 12-byte Ed25519 prefix + 32-byte raw public key
+            let spkiPrefix = Data([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
+            let spkiData = spkiPrefix + publicKey.rawRepresentation
+            let publicKeyPem = "-----BEGIN PUBLIC KEY-----\n\(spkiData.base64EncodedString())\n-----END PUBLIC KEY-----\n"
+
+            // PKCS8 = 16-byte Ed25519 prefix + 32-byte seed
+            let pkcs8Prefix = Data([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20])
+            let pkcs8Data = pkcs8Prefix + privateKey.rawRepresentation
+            let privateKeyPem = "-----BEGIN PRIVATE KEY-----\n\(pkcs8Data.base64EncodedString())\n-----END PRIVATE KEY-----\n"
+
+            // Derive deviceId = SHA-256 of raw public key (hex)
+            let hash = SHA256.hash(data: publicKey.rawRepresentation)
+            let deviceId = hash.compactMap { String(format: "%02x", $0) }.joined()
+
+            // Persist to disk (mode 0600, matching OpenClaw)
+            let dir = path.deletingLastPathComponent()
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let stored: [String: Any] = [
+                "version": 1,
+                "deviceId": deviceId,
+                "publicKeyPem": publicKeyPem,
+                "privateKeyPem": privateKeyPem,
+                "createdAtMs": Int(Date().timeIntervalSince1970 * 1000)
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: stored, options: [.prettyPrinted, .sortedKeys]) {
+                try? jsonData.write(to: path)
+                // Set file permissions to 0600 (owner read/write only)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            }
+
+            return DeviceIdentity(deviceId: deviceId, publicKeyPem: publicKeyPem, privateKeyPem: privateKeyPem)
+        }
+    }
+
+    /// Calls a Gateway RPC method via WebSocket, bypassing CLI process overhead.
+    /// Protocol: connect.challenge → connect handshake (with device auth) → hello-ok → request → response.
+    nonisolated private func gatewayRPC(method: String, params: [String: Any], timeout: TimeInterval = 15) async throws -> [String: Any] {
+        let currentBaseURL = await baseURL
+        let currentToken = await authToken ?? ""
+
+        guard var components = URLComponents(url: currentBaseURL, resolvingAgainstBaseURL: false) else {
+            throw GatewayError.badResponse
+        }
+        components.scheme = "ws"
+
+        guard let wsURL = components.url else {
+            throw GatewayError.badResponse
+        }
+
+        let wsTask = URLSession.shared.webSocketTask(with: wsURL)
+        wsTask.resume()
+        defer { wsTask.cancel(with: .normalClosure, reason: nil) }
+
+        // Step 1: Wait for connect.challenge event to get the nonce
+        var challengeNonce: String?
+        while true {
+            let msg = try await wsTask.receive()
+            guard case .string(let text) = msg,
+                  let data = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if json["type"] as? String == "event",
+               json["event"] as? String == "connect.challenge",
+               let payload = json["payload"] as? [String: Any],
+               let nonce = payload["nonce"] as? String {
+                challengeNonce = nonce
+                break
+            }
+        }
+
+        // Step 2: Build connect frame with device identity
+        let scopes = ["operator.admin", "operator.read", "operator.write"]
+        let connectId = UUID().uuidString
+        let signedAtMs = Int(Date().timeIntervalSince1970 * 1000)
+
+        var connectParams: [String: Any] = [
+            "minProtocol": 3,
+            "maxProtocol": 3,
+            "client": [
+                "id": "openclaw-macos",
+                "displayName": "BuzyClaw",
+                "version": "1.0.0",
+                "platform": "darwin",
+                "mode": "ui"
+            ] as [String: Any],
+            "role": "operator",
+            "scopes": scopes,
+            "auth": [
+                "token": currentToken
+            ] as [String: Any]
+        ]
+
+        // Attach device identity (required for operator scopes; auto-creates if missing)
+        if let device = DeviceIdentity.loadOrCreate(),
+           let nonce = challengeNonce,
+           let publicKeyB64 = device.rawPublicKeyBase64Url {
+            // Build v3 signature payload: "v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily"
+            let scopesStr = scopes.joined(separator: ",")
+            let payload = ["v3", device.deviceId, "openclaw-macos", "ui", "operator", scopesStr,
+                           String(signedAtMs), currentToken, nonce, "darwin", ""].joined(separator: "|")
+            if let signature = device.sign(payload) {
+                connectParams["device"] = [
+                    "id": device.deviceId,
+                    "publicKey": publicKeyB64,
+                    "signature": signature,
+                    "signedAt": signedAtMs,
+                    "nonce": nonce
+                ] as [String: Any]
+            }
+        }
+
+        let connectFrame: [String: Any] = [
+            "type": "req",
+            "id": connectId,
+            "method": "connect",
+            "params": connectParams
+        ]
+
+        let connectData = try JSONSerialization.data(withJSONObject: connectFrame)
+        let connectStr = String(data: connectData, encoding: .utf8) ?? "{}"
+        try await wsTask.send(.string(connectStr))
+
+        // Step 3: Wait for hello-ok response (skip event frames)
+        while true {
+            let msg = try await wsTask.receive()
+            guard case .string(let text) = msg,
+                  let data = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            if json["type"] as? String == "res" && json["id"] as? String == connectId {
+                let ok = json["ok"] as? Bool ?? false
+                if !ok {
+                    let error = json["error"] as? [String: Any]
+                    let message = error?["message"] as? String ?? "连接握手失败"
+                    throw GatewayError.httpError(statusCode: 400, detail: message)
+                }
+                break
+            }
+        }
+
+        // Step 4: Send the actual RPC request
+        let requestId = UUID().uuidString
+        let requestFrame: [String: Any] = [
+            "type": "req",
+            "id": requestId,
+            "method": method,
+            "params": params
+        ]
+        let reqData = try JSONSerialization.data(withJSONObject: requestFrame)
+        let reqStr = String(data: reqData, encoding: .utf8) ?? "{}"
+        try await wsTask.send(.string(reqStr))
+
+        // Step 5: Receive frames until we get the matching response (with timeout)
+        let responseData: Data = try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                while true {
+                    let message = try await wsTask.receive()
+                    guard case .string(let text) = message,
+                          let data = text.data(using: .utf8),
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                    guard json["type"] as? String == "res",
+                          json["id"] as? String == requestId else { continue }
+                    let ok = json["ok"] as? Bool ?? false
+                    if ok {
+                        let payload = json["payload"] ?? [String: Any]()
+                        return try JSONSerialization.data(withJSONObject: payload)
+                    } else {
+                        let error = json["error"] as? [String: Any]
+                        let message = error?["message"] as? String ?? "RPC call failed"
+                        throw GatewayError.httpError(statusCode: 400, detail: message)
+                    }
+                }
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(timeout))
+                throw GatewayError.httpError(statusCode: -1, detail: "RPC 查询超时")
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+
+        guard let payload = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            throw GatewayError.badResponse
+        }
+        return payload
     }
 
     // MARK: - Agent Management
@@ -660,72 +940,148 @@ final class GatewayClient: Sendable {
         let bundled: Bool
     }
 
-    private static func resolveCLICommand() -> RuntimeCommand {
+    nonisolated private static func resolveCLICommands() -> [RuntimeCommand] {
+        var candidates: [RuntimeCommand] = []
+
+        // 1. Bundled runtime
         if let resourceURL = Bundle.main.resourceURL {
             let bundledNode = resourceURL.appendingPathComponent("Resources/runtime/node")
             let bundledOpenclaw = resourceURL.appendingPathComponent("Resources/runtime/openclaw/openclaw.mjs")
             if FileManager.default.fileExists(atPath: bundledNode.path)
                 && FileManager.default.fileExists(atPath: bundledOpenclaw.path)
             {
-                return RuntimeCommand(
+                candidates.append(RuntimeCommand(
                     executable: bundledNode,
                     argumentsPrefix: [bundledOpenclaw.path],
                     bundled: true
-                )
+                ))
             }
         }
 
-        // Dev fallback
-        return RuntimeCommand(
-            executable: URL(fileURLWithPath: "/usr/local/bin/openclaw"),
-            argumentsPrefix: [],
-            bundled: false
-        )
+        // 2. System node + openclaw.mjs (resolves shebang issues in GUI apps)
+        let fm = FileManager.default
+        let openclawBin = "/usr/local/bin/openclaw"
+        let resolvedMjs: String? = {
+            if let dest = try? fm.destinationOfSymbolicLink(atPath: openclawBin) {
+                let resolved = dest.hasPrefix("/") ? dest : "/usr/local/bin/" + dest
+                if fm.fileExists(atPath: resolved) { return resolved }
+            }
+            let commonPath = "/usr/local/lib/node_modules/openclaw/openclaw.mjs"
+            if fm.fileExists(atPath: commonPath) { return commonPath }
+            return nil
+        }()
+
+        let nodePaths = ["/usr/local/bin/node", "/opt/homebrew/bin/node"]
+        let nodePath = nodePaths.first { fm.fileExists(atPath: $0) }
+
+        if let nodePath, let resolvedMjs {
+            candidates.append(RuntimeCommand(
+                executable: URL(fileURLWithPath: nodePath),
+                argumentsPrefix: [resolvedMjs],
+                bundled: false
+            ))
+        }
+
+        // 3. Final fallback: shebang script directly
+        if fm.fileExists(atPath: openclawBin) {
+            candidates.append(RuntimeCommand(
+                executable: URL(fileURLWithPath: openclawBin),
+                argumentsPrefix: [],
+                bundled: false
+            ))
+        }
+
+        return candidates
     }
 
-    private func runCLI(arguments: [String]) async throws -> String {
+    private func runCLI(arguments: [String], timeout: TimeInterval = 0) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let command = Self.resolveCLICommand()
-                    let process = Process()
-                    process.executableURL = command.executable
-                    process.arguments = command.argumentsPrefix + arguments
-
-                    // Ensure PATH includes common node/bin paths
-                    var env = ProcessInfo.processInfo.environment
-                    let extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
-                    let currentPath = env["PATH"] ?? "/usr/bin:/bin"
-                    var seen = Set<String>()
-                    let allPaths = (extraPaths + currentPath.components(separatedBy: ":")).filter { seen.insert($0).inserted }
-                    env["PATH"] = allPaths.joined(separator: ":")
-                    process.environment = env
-
-                    NSLog(
-                        "[ClawTower] runCLI (%@): %@ %@",
-                        command.bundled ? "bundled" : "system",
-                        command.executable.path,
-                        (command.argumentsPrefix + arguments).joined(separator: " ")
-                    )
-
-                    let pipe = Pipe()
-                    process.standardOutput = pipe
-                    process.standardError = pipe
-                    try process.run()
-                    process.waitUntilExit()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    let output = String(data: data, encoding: .utf8) ?? ""
-
-                    NSLog("[ClawTower] runCLI exit=%d output=%@", process.terminationStatus, String(output.prefix(500)))
-
-                    if process.terminationStatus != 0 {
-                        continuation.resume(throwing: GatewayError.httpError(statusCode: Int(process.terminationStatus), detail: output))
-                    } else {
-                        continuation.resume(returning: output)
-                    }
-                } catch {
-                    continuation.resume(throwing: error)
+                let candidates = Self.resolveCLICommands()
+                guard !candidates.isEmpty else {
+                    continuation.resume(throwing: GatewayError.httpError(statusCode: 1, detail: "No openclaw runtime found"))
+                    return
                 }
+
+                // Shared environment
+                var env = ProcessInfo.processInfo.environment
+                let extraPaths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+                let currentPath = env["PATH"] ?? "/usr/bin:/bin"
+                var seen = Set<String>()
+                let allPaths = (extraPaths + currentPath.components(separatedBy: ":")).filter { seen.insert($0).inserted }
+                env["PATH"] = allPaths.joined(separator: ":")
+
+                var lastError: Error?
+
+                for command in candidates {
+                    do {
+                        let process = Process()
+                        process.executableURL = command.executable
+                        process.arguments = command.argumentsPrefix + arguments
+                        process.environment = env
+
+                        NSLog(
+                            "[ClawTower] runCLI (%@): %@ %@",
+                            command.bundled ? "bundled" : "system",
+                            command.executable.path,
+                            (command.argumentsPrefix + arguments).joined(separator: " ")
+                        )
+
+                        let pipe = Pipe()
+                        process.standardOutput = pipe
+                        process.standardError = pipe
+                        try process.run()
+
+                        // If a timeout is set, wait with a deadline; otherwise wait indefinitely.
+                        if timeout > 0 {
+                            let deadline = Date().addingTimeInterval(timeout)
+                            while process.isRunning && Date() < deadline {
+                                Thread.sleep(forTimeInterval: 0.1)
+                            }
+                            if process.isRunning {
+                                NSLog("[ClawTower] runCLI timeout (%.0fs), terminating process", timeout)
+                                process.terminate()
+                                // Give process a moment to clean up
+                                Thread.sleep(forTimeInterval: 0.5)
+                                if process.isRunning { process.interrupt() }
+                                continuation.resume(throwing: GatewayError.httpError(statusCode: -1, detail: "CLI 操作超时"))
+                                return
+                            }
+                        } else {
+                            process.waitUntilExit()
+                        }
+
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        let output = String(data: data, encoding: .utf8) ?? ""
+
+                        NSLog("[ClawTower] runCLI exit=%d output=%@", process.terminationStatus, String(output.prefix(500)))
+
+                        if process.terminationStatus == 0 {
+                            continuation.resume(returning: output)
+                            return
+                        }
+
+                        // If this was a module-not-found or startup error, try next candidate
+                        let isStartupError = output.contains("ERR_MODULE_NOT_FOUND")
+                            || output.contains("Failed to start CLI")
+                            || output.contains("Cannot find package")
+                        if isStartupError && candidates.count > 1 {
+                            NSLog("[ClawTower] runCLI runtime startup error, trying next candidate")
+                            lastError = GatewayError.httpError(statusCode: Int(process.terminationStatus), detail: output)
+                            continue
+                        }
+
+                        // Non-startup error: this is a real command failure, report it
+                        continuation.resume(throwing: GatewayError.httpError(statusCode: Int(process.terminationStatus), detail: output))
+                        return
+                    } catch {
+                        NSLog("[ClawTower] runCLI process launch error: %@", error.localizedDescription)
+                        lastError = error
+                        continue
+                    }
+                }
+
+                continuation.resume(throwing: lastError ?? GatewayError.httpError(statusCode: 1, detail: "All CLI candidates failed"))
             }
         }
     }
@@ -954,15 +1310,32 @@ final class GatewayClient: Sendable {
                     result.errorMessage = "无 Anthropic 凭证"
                     return result
                 }
+
+                // OAuth tokens (sk-ant-oat...) require Bearer auth + special betas;
+                // regular API keys use x-api-key header.
+                let isOAuth = token.contains("sk-ant-oat")
+
+                // Strip date suffix (e.g. "claude-opus-4-6-20250415" → "claude-opus-4-6")
+                let cleanSlug = modelSlug.replacingOccurrences(
+                    of: "-20\\d{6,}", with: "", options: .regularExpression)
+
                 let url = URL(string: "https://api.anthropic.com/v1/messages")!
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue(token, forHTTPHeaderField: "x-api-key")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
                 request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
 
+                if isOAuth {
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    request.setValue("claude-code-20250219,oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+                    request.setValue("true", forHTTPHeaderField: "anthropic-dangerous-direct-browser-access")
+                } else {
+                    request.setValue(token, forHTTPHeaderField: "x-api-key")
+                }
+
                 let body: [String: Any] = [
-                    "model": modelSlug,
+                    "model": cleanSlug,
                     "max_tokens": 1,
                     "messages": [["role": "user", "content": "."]]
                 ]
@@ -974,45 +1347,19 @@ final class GatewayClient: Sendable {
                     return result
                 }
 
-                NSLog("[ModelProbe] Anthropic headers for %@: %@", model, http.allHeaderFields)
+                NSLog("[ModelProbe] Anthropic status=%d headers=%@", http.statusCode, http.allHeaderFields)
 
-                if http.statusCode == 429 {
-                    result.errorMessage = "已达上限"
-                    // Still try to parse rate limit headers from 429 response
-                    for (key, value) in http.allHeaderFields {
-                        let k = "\(key)".lowercased()
-                        if k == "anthropic-ratelimit-unified-5h-utilization",
-                           let v = Double("\(value)") {
-                            result.fiveHourUtilization = v
-                        }
-                        if k == "anthropic-ratelimit-unified-7d-utilization",
-                           let v = Double("\(value)") {
-                            result.sevenDayUtilization = v
-                        }
-                        if k == "anthropic-ratelimit-unified-5h-reset",
-                           let v = Double("\(value)") {
-                            result.fiveHourResetTime = Date(timeIntervalSince1970: v)
-                        }
-                        if k == "anthropic-ratelimit-unified-7d-reset",
-                           let v = Double("\(value)") {
-                            result.sevenDayResetTime = Date(timeIntervalSince1970: v)
-                        }
-                        if k == "anthropic-ratelimit-tokens-reset" {
-                            result.resetTime = Self.parseISO8601("\(value)")
-                        }
-                    }
-                    result.updatedAt = Date()
-                    return result
-                }
-
-                guard http.statusCode == 200 else {
+                guard http.statusCode == 200 || http.statusCode == 429 else {
                     result.errorMessage = "HTTP \(http.statusCode)"
                     return result
                 }
 
                 result.isAvailable = true
+                if http.statusCode == 429 {
+                    result.errorMessage = "已达上限"
+                }
 
-                // Extract Anthropic rate limit headers
+                // Parse Anthropic rate limit headers
                 for (key, value) in http.allHeaderFields {
                     let k = "\(key)".lowercased()
                     if k == "anthropic-ratelimit-unified-5h-utilization",
@@ -1044,7 +1391,6 @@ final class GatewayClient: Sendable {
                     }
                 }
 
-                // Calculate token utilization from limit/remaining
                 if let limit = result.tokensLimit, let remaining = result.tokensRemaining, limit > 0 {
                     result.tokenUtilization = 1.0 - (Double(remaining) / Double(limit))
                 }
@@ -1101,31 +1447,17 @@ final class GatewayClient: Sendable {
 
                 NSLog("[ModelProbe] OpenAI headers for %@: %@", model, http.allHeaderFields)
 
-                if http.statusCode == 429 {
-                    result.errorMessage = "已达上限"
-                    // Try to parse rate limit headers from 429 response (OpenAI may not include them)
-                    if let limitTokStr = Self.headerValue(from: http, key: "x-ratelimit-limit-tokens"),
-                       let remainTokStr = Self.headerValue(from: http, key: "x-ratelimit-remaining-tokens"),
-                       let limitTok = Int(limitTokStr), let remainTok = Int(remainTokStr), limitTok > 0 {
-                        result.tokensLimit = limitTok
-                        result.tokensRemaining = remainTok
-                        result.tokenUtilization = 1.0 - (Double(remainTok) / Double(limitTok))
-                    }
-                    if let resetStr = Self.headerValue(from: http, key: "x-ratelimit-reset-tokens") {
-                        result.resetTime = Self.parseResetDuration(resetStr)
-                    }
-                    result.updatedAt = Date()
-                    return result
-                }
-
-                guard http.statusCode == 200 else {
+                guard http.statusCode == 200 || http.statusCode == 429 else {
                     result.errorMessage = "HTTP \(http.statusCode)"
                     return result
                 }
 
                 result.isAvailable = true
+                if http.statusCode == 429 {
+                    result.errorMessage = "已达上限"
+                }
 
-                // Parse OpenAI rate limit headers
+                // Parse OpenAI rate limit headers (present on both 200 and 429)
                 if let limitReqStr = Self.headerValue(from: http, key: "x-ratelimit-limit-requests"),
                    let remainReqStr = Self.headerValue(from: http, key: "x-ratelimit-remaining-requests"),
                    let limitReq = Double(limitReqStr), let remainReq = Double(remainReqStr), limitReq > 0 {
@@ -1324,5 +1656,17 @@ final class GatewayClient: Sendable {
                 return detail.isEmpty ? "Gateway 错误 (HTTP \(code))" : "Gateway 错误 (HTTP \(code)): \(detail)"
             }
         }
+    }
+}
+
+// MARK: - Base64 URL Encoding
+
+private extension Data {
+    /// Base64 URL encoding without padding (RFC 4648 §5).
+    var base64UrlEncoded: String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 }

@@ -1,0 +1,49 @@
+"app.name" = "虾忙";
+"menu.open" = "打开虾忙";
+"menu.quit" = "退出";
+"usage_statistics" = "用量统计";
+
+/* Voice Input */
+"voice.listening_hint" = "请开始说话...";
+"voice.recording_failed" = "录音启动失败";
+"voice.unavailable" = "语音识别不可用";
+
+/* Setup Guide - Common */
+"guide.setup.title" = "如何开始使用";
+"guide.setup.step1" = "在 Mac 上下载虾忙";
+"guide.setup.step2" = "登录同一个 iCloud 账号";
+"guide.setup.step3" = "打开 macOS 端，即刻开始";
+"guide.status.waiting" = "等待连接电脑端";
+"guide.status.retry" = "重试";
+
+/* Setup Guide - Chat */
+"guide.chat.title" = "AI 对话";
+"guide.chat.description" = "随时随地与 AI 助手对话，消息通过 iCloud 安全同步。";
+"guide.chat.feature1" = "向 Mac 上的 AI Agent 发送消息";
+"guide.chat.feature2" = "消息通过 iCloud 实时同步";
+"guide.chat.feature3" = "向 AI Agent 分享图片";
+"guide.chat.input_hint" = "连接 Mac 即可开始对话";
+"guide.chat.input_detail" = "确保 Mac 上的虾忙已打开，且登录同一 iCloud 账号";
+"guide.chat.ready" = "准备就绪";
+"guide.chat.sync_hint" = "Mac 连接后，消息通过 iCloud 同步";
+
+/* Setup Guide - Dashboard */
+"guide.dashboard.title" = "看板";
+"guide.dashboard.description" = "总览项目、任务和 AI Agent 状态，从 Mac 实时同步。";
+"guide.dashboard.feature1" = "跟踪项目进度和阶段";
+"guide.dashboard.feature2" = "查看和管理任务建议";
+"guide.dashboard.feature3" = "监控 Agent 活动和用量";
+
+/* Setup Guide - Cron Jobs */
+"guide.cron.title" = "定时任务";
+"guide.cron.description" = "为 AI Agent 设置周期性任务，自动执行，无需守在电脑旁。";
+"guide.cron.feature1" = "配置灵活的定时计划";
+"guide.cron.feature2" = "任务自动循环执行";
+"guide.cron.feature3" = "任务完成时收到通知";
+
+/* Setup Guide - Second Brain */
+"guide.brain.title" = "第二大脑";
+"guide.brain.description" = "AI 的长期记忆，Agent 可在对话中随时参考的知识库。";
+"guide.brain.feature1" = "存储持久化的知识文档";
+"guide.brain.feature2" = "Agent 跨会话学习和记忆";
+"guide.brain.feature3" = "按分组和类别整理";

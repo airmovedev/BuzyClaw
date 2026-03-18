@@ -32,6 +32,13 @@ struct SkillMissing: Codable, Sendable {
     }
 }
 
+struct SkillInstallOption: Codable, Sendable {
+    var id: String
+    var kind: String
+    var label: String
+    var bins: [String]
+}
+
 struct Skill: Identifiable, Codable, Sendable {
     var name: String
     var description: String?
@@ -43,11 +50,29 @@ struct Skill: Identifiable, Codable, Sendable {
     var bundled: Bool
     var homepage: String?
     var missing: SkillMissing
+    var install: [SkillInstallOption]?
 
     var id: String { name }
 
     var displayEmoji: String { emoji ?? "📦" }
     var canBeEnabled: Bool { eligible && !blockedByAllowlist }
+    var hasInstallOptions: Bool { !(install ?? []).isEmpty }
+
+    /// Whether the only blocker is missing OS support — nothing the user can do about it
+    var blockedByOS: Bool { !missing.os.isEmpty }
+
+    /// Whether bins might be installable — true if we have install info, or bins are the
+    /// only (or part of the) missing requirement (most can be installed via brew/npm/go)
+    var needsBinInstall: Bool { !missing.bins.isEmpty || !missing.anyBins.isEmpty }
+
+    /// Whether the skill needs env vars to be configured
+    var needsEnvConfig: Bool { !missing.env.isEmpty }
+
+    /// Whether the skill needs config entries (channels, plugins, etc.)
+    var needsAppConfig: Bool { !missing.config.isEmpty }
+
+    /// In onboarding, only OS-blocked and allowlist-blocked skills are truly untoggleable
+    var canBeToggledInOnboarding: Bool { !blockedByAllowlist && !blockedByOS }
     var missingSummary: String? { missing.summary }
 
     var sourceLabel: String {

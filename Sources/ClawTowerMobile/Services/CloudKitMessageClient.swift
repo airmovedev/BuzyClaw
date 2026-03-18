@@ -47,7 +47,31 @@ struct CachedMessage: Codable {
 final class CloudKitMessageClient {
     // MARK: - Observable state
 
-    var messages: [MessageRecord] = []
+    /// All messages for the current session (full local + CloudKit history).
+    /// Views should use `displayedMessages` for rendering.
+    var allSessionMessages: [MessageRecord] = []
+
+    /// Number of messages currently visible in the chat view (grows as user scrolls up).
+    var displayedMessageCount: Int = 50
+
+    /// Messages visible to the UI — the last `displayedMessageCount` items of `allSessionMessages`.
+    var displayedMessages: [MessageRecord] {
+        let total = allSessionMessages.count
+        if total <= displayedMessageCount { return allSessionMessages }
+        return Array(allSessionMessages.suffix(displayedMessageCount))
+    }
+
+    /// Whether there are older messages beyond the currently displayed slice.
+    var hasMoreMessages: Bool {
+        allSessionMessages.count > displayedMessageCount
+    }
+
+    /// Backwards-compatible alias used internally for code that operates on the full set.
+    private var messages: [MessageRecord] {
+        get { allSessionMessages }
+        set { allSessionMessages = newValue }
+    }
+
     var isSyncing = false
     var lastSyncDate: Date?
     var lastError: String?
@@ -69,6 +93,7 @@ final class CloudKitMessageClient {
     var debugTestWriteResult: String?
     var debugDashboardResult: String = "未测试"
     var debugDashboardLoading: Bool = false
+    var showQuotaExceededAlert: Bool = false
 
     // MARK: - Private
 
@@ -178,6 +203,11 @@ final class CloudKitMessageClient {
             }
 
             lastError = nil
+
+            // Preload default agent's messages immediately so data is ready
+            // when user taps into a chat — no need to wait for selectAgent().
+            loadLocalCache()
+            Task { await loadHistory() }
         } catch {
             NSLog("[CloudKitMessage] Failed to start sync engine: %@", error.localizedDescription)
             lastError = "CloudKit 启动失败: \(error.localizedDescription)"
@@ -251,6 +281,11 @@ final class CloudKitMessageClient {
             logger.info("✅ Message saved to CloudKit: \(message.id)")
             lastError = nil
             saveLocalCache()
+        } catch let ckError as CKError where ckError.code == .quotaExceeded {
+            NSLog("[iOS] ❌ CloudKit quota exceeded")
+            logger.error("❌ iCloud quota exceeded")
+            lastError = "iCloud 空间不足"
+            showQuotaExceededAlert = true
         } catch {
             NSLog("[iOS] ❌ CloudKit save FAILED: %@", error.localizedDescription)
             logger.error("❌ Failed to send message: \(error.localizedDescription)")
@@ -295,6 +330,7 @@ final class CloudKitMessageClient {
         NSLog("[iOS] Sending message id=%@ sessionKey=%@ direction=%@ status=%@ to zone=%@",
               message.id, message.sessionKey, message.direction.rawValue, message.status.rawValue, CloudKitConstants.zoneID.zoneName)
 
+        Self.cacheImageIfNeeded(for: message)
         messages.append(message)
         saveLocalCache()
 
@@ -312,6 +348,11 @@ final class CloudKitMessageClient {
             logger.info("✅ Image message saved to CloudKit: \(message.id)")
             lastError = nil
             saveLocalCache()
+        } catch let ckError as CKError where ckError.code == .quotaExceeded {
+            NSLog("[iOS] ❌ CloudKit quota exceeded (image message)")
+            logger.error("❌ iCloud quota exceeded")
+            lastError = "iCloud 空间不足"
+            showQuotaExceededAlert = true
         } catch {
             NSLog("[iOS] ❌ CloudKit save FAILED: %@", error.localizedDescription)
             logger.error("❌ Failed to send image message: \(error.localizedDescription)")
@@ -357,10 +398,23 @@ final class CloudKitMessageClient {
             let existingIDs = Set(messages.map(\.id))
             var didChange = false
             for msg in newMessages {
+                Self.cacheImageIfNeeded(for: msg)
                 if msg.direction == .fromGateway && !existingIDs.contains(msg.id) {
                     let responseAgentId = msg.sessionKey.split(separator: ":").dropFirst().first.map(String.init) ?? "main"
                     if responseAgentId != selectedAgentId || isInBackground {
                         unreadAgentIds.insert(responseAgentId)
+                    }
+
+                    // Send notification for cross-session messages immediately
+                    // (pollAllAgentsForNotifications only checks the messages array which is session-scoped)
+                    if msg.sessionKey != sessionKey && isInitialSyncDone && !notifiedMessageIDs.contains(msg.id) {
+                        notifiedMessageIDs.insert(msg.id)
+                        NotificationManager.shared.sendLocalNotification(
+                            title: "💬 \(responseAgentId)",
+                            body: msg.content,
+                            sessionKey: msg.sessionKey
+                        )
+                        UserDefaults.standard.set(Array(notifiedMessageIDs), forKey: Self.notifiedIDsKey)
                     }
 
                     // Only add to displayed messages if it belongs to the current session
@@ -551,9 +605,14 @@ final class CloudKitMessageClient {
             let sessionKey = currentSessionKey
             let existingIDs = Set(messages.map(\.id))
             var didChange = false
-            for msg in allMessages where !existingIDs.contains(msg.id) && msg.sessionKey == sessionKey {
-                messages.append(msg)
-                didChange = true
+            for msg in allMessages {
+                // Cache image data for any message that has a CKAsset
+                Self.cacheImageIfNeeded(for: msg)
+
+                if !existingIDs.contains(msg.id) && msg.sessionKey == sessionKey {
+                    messages.append(msg)
+                    didChange = true
+                }
             }
             // Also update statuses for current session messages without regressing local ACK state
             for msg in allMessages where msg.sessionKey == sessionKey {
@@ -563,6 +622,10 @@ final class CloudKitMessageClient {
                     if merged != oldStatus {
                         messages[idx].status = merged
                         didChange = true
+                    }
+                    // Merge imageAsset from CloudKit into cached messages that lack it
+                    if messages[idx].imageAsset == nil, msg.imageAsset != nil {
+                        messages[idx].imageAsset = msg.imageAsset
                     }
                 }
             }
@@ -629,6 +692,7 @@ final class CloudKitMessageClient {
         isWaitingForReply = false
         optimisticallyReceivedMessageIDs.removeAll()
         unreadAgentIds.remove(agentId)
+        displayedMessageCount = 50
         UserDefaults.standard.set(agentId, forKey: Self.agentKey)
         loadLocalCache()
         Task { await loadHistory() }
@@ -638,12 +702,19 @@ final class CloudKitMessageClient {
         customSessionKey = sessionKey
         isWaitingForReply = false
         optimisticallyReceivedMessageIDs.removeAll()
+        displayedMessageCount = 50
         let parts = sessionKey.split(separator: ":")
         if parts.count >= 2 {
             selectedAgentId = String(parts[1])
         }
         loadLocalCache()
         Task { await loadHistory() }
+    }
+
+    /// Load 50 more older messages into the displayed slice.
+    func loadMoreMessages() {
+        guard hasMoreMessages else { return }
+        displayedMessageCount += 50
     }
 
     // MARK: - CKSyncEngine handling
@@ -660,6 +731,8 @@ final class CloudKitMessageClient {
                 let record = modification.record
                 guard record.recordType == MessageRecord.recordType else { continue }
                 guard let msg = MessageRecord.from(record: record) else { continue }
+
+                Self.cacheImageIfNeeded(for: msg)
 
                 if msg.direction == .fromGateway {
                     let existingIDs = Set(messages.map(\.id))
@@ -818,15 +891,39 @@ final class CloudKitMessageClient {
 
     private func saveLocalCache() {
         let cached = messages.map { CachedMessage(from: $0) }
-        let trimmed = Array(cached.suffix(100))
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .secondsSince1970
-            let data = try encoder.encode(trimmed)
+            let data = try encoder.encode(cached)
             try data.write(to: cacheFileURL(), options: .atomic)
         } catch {
             logger.error("Failed to save local cache: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Image Cache
+
+    private static var imageCacheDir: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return docs.appendingPathComponent("image-cache", isDirectory: true)
+    }
+
+    /// Persist CKAsset image data to local file for a given message ID.
+    static func cacheImageIfNeeded(for message: MessageRecord) {
+        guard let asset = message.imageAsset,
+              let fileURL = asset.fileURL,
+              let data = try? Data(contentsOf: fileURL) else { return }
+        let dir = imageCacheDir
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent("\(message.id).dat")
+        guard !FileManager.default.fileExists(atPath: dest.path) else { return }
+        try? data.write(to: dest, options: .atomic)
+    }
+
+    /// Load cached image data for a message ID, returns nil if not cached.
+    static func cachedImageData(for messageID: String) -> Data? {
+        let file = imageCacheDir.appendingPathComponent("\(messageID).dat")
+        return try? Data(contentsOf: file)
     }
 
     // MARK: - Debug helpers
@@ -855,8 +952,14 @@ final class CloudKitMessageClient {
                 .record(for: DashboardSnapshotRecord.recordID)
             let recordType = record.recordType
             let recordName = record.recordID.recordName
-            let creationDate = record.creationDate.map { "\($0)" } ?? "nil"
-            let modificationDate = record.modificationDate.map { "\($0)" } ?? "nil"
+            let dateFmt: (Date) -> String = { date in
+                let f = DateFormatter()
+                f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                f.timeZone = .current
+                return "\(f.string(from: date)) (\(f.timeZone.abbreviation() ?? ""))"
+            }
+            let creationDate = record.creationDate.map { dateFmt($0) } ?? "nil"
+            let modificationDate = record.modificationDate.map { dateFmt($0) } ?? "nil"
             let payload = (record["payload"] as? String) ?? "(无 payload 字段)"
             let dataPreview = String(payload.prefix(200))
             debugDashboardResult = """

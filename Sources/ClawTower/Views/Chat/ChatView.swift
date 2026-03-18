@@ -12,6 +12,7 @@ struct ChatView: View {
     let sessionKey: String
     let injectedContext: String?
     var appState: AppState
+    @Environment(\.themeColor) private var themeColor
 
     @State private var messages: [ChatMessage] = []
     @State private var inputText = ""
@@ -35,7 +36,7 @@ struct ChatView: View {
     @State private var lastDisplayMessageIDs: [String] = []
     @State private var rateLimitInfo: RateLimitInfo?
 
-    private static let chatPerfLoggingEnabled = true
+    private static let chatPerfLoggingEnabled = false
     private static let chatPerfPrefix = "[ChatPerf]"
     private static let riskyMessageContentLengthThreshold = 1200
     private static let logThrottleWindow: CFAbsoluteTime = 1.0
@@ -397,17 +398,26 @@ struct ChatView: View {
             let fetchedLastId = sorted.last?.id
 
             if fetchedLastId != currentLastId {
-                // 用服务端消息替换本地消息（避免时间戳差异导致重复）
-                // 对 user 和 assistant 消息都按 role+timestamp 去重
-                let serverTimestamps = sorted.map { (role: $0.role, ts: Int($0.timestamp.timeIntervalSince1970)) }
+                // Drop local messages that have a corresponding server message.
+                // Match by: same ID, OR same role within 5s AND similar content.
+                // This handles locally-created messages (UUID ids) whose server
+                // counterparts have generated ids (role-timestamp).
                 let filteredLocal = messages.filter { msg in
-                    let localTs = Int(msg.timestamp.timeIntervalSince1970)
-                    let hasServerMatch = serverTimestamps.contains { $0.role == msg.role && abs($0.ts - localTs) <= 2 }
-                    // If server has a matching message by role+timestamp, drop the local copy (server version wins)
-                    if hasServerMatch && !sorted.contains(where: { $0.id == msg.id }) {
-                        return false
+                    // Keep if server has the exact same ID (will be deduplicated later)
+                    if sorted.contains(where: { $0.id == msg.id }) { return true }
+                    // Check for a server message with same role, close timestamp, and matching content
+                    let localTs = msg.timestamp.timeIntervalSince1970
+                    let hasServerEquivalent = sorted.contains { serverMsg in
+                        guard serverMsg.role == msg.role else { return false }
+                        let timeDiff = abs(serverMsg.timestamp.timeIntervalSince1970 - localTs)
+                        guard timeDiff <= 5 else { return false }
+                        // Content match: prefix comparison (server may strip/add formatting)
+                        let localPrefix = String(msg.content.prefix(100))
+                        let serverPrefix = String(serverMsg.content.prefix(100))
+                        return localPrefix == serverPrefix
                     }
-                    return true
+                    // Drop local copy if server has an equivalent (server version wins)
+                    return !hasServerEquivalent
                 }
                 let merged = deduplicated(filteredLocal + sorted).sorted { $0.timestamp < $1.timestamp || ($0.timestamp == $1.timestamp && $0.role == .user && $1.role != .user) }
                 var finalMessages = merged
@@ -709,15 +719,20 @@ struct ChatView: View {
                 guard streamingGeneration == myGeneration else { return }
                 if let history = try? await client.getHistory(sessionKey: sessionKey) {
                     // Merge server history with local messages, deduplicating by ID
-                    // AND by role+timestamp proximity (local messages have different IDs than server)
+                    // AND by role+timestamp+content proximity (local messages have different IDs than server)
                     let existingIds = Set(messages.map(\.id))
-                    let existingTimestamps = messages.map { (role: $0.role, ts: Int($0.timestamp.timeIntervalSince1970)) }
                     let newMessages = history.filter { serverMsg in
                         if existingIds.contains(serverMsg.id) { return false }
-                        // Check if a local message with same role exists within 2 seconds
-                        let serverTs = Int(serverMsg.timestamp.timeIntervalSince1970)
-                        let hasTsMatch = existingTimestamps.contains { $0.role == serverMsg.role && abs($0.ts - serverTs) <= 2 }
-                        if hasTsMatch { return false }
+                        let serverTs = serverMsg.timestamp.timeIntervalSince1970
+                        let serverPrefix = String(serverMsg.content.prefix(100))
+                        let hasLocalEquivalent = messages.contains { local in
+                            guard local.role == serverMsg.role else { return false }
+                            let timeDiff = abs(local.timestamp.timeIntervalSince1970 - serverTs)
+                            guard timeDiff <= 5 else { return false }
+                            let localPrefix = String(local.content.prefix(100))
+                            return localPrefix == serverPrefix
+                        }
+                        if hasLocalEquivalent { return false }
                         if shouldHideInChat(serverMsg) { return false }
                         return true
                     }
@@ -856,7 +871,16 @@ private struct AutoResizingTextView: NSViewRepresentable {
         // 输入法正在预编辑时不要覆盖文本，否则会打断中文输入
         if textView.hasMarkedText() { return }
         if textView.string != text {
-            textView.string = text
+            // Use attributed string to preserve font and text color when setting
+            // text programmatically (e.g. injected task context). Plain .string
+            // assignment can lose attributes, causing invisible text.
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: textView.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize),
+                .foregroundColor: NSColor.labelColor
+            ]
+            textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: attrs))
+            // Restore typing attributes so subsequent keyboard input also uses the correct style
+            textView.typingAttributes = attrs
             context.coordinator.updateHeight(textView)
         }
     }
@@ -908,6 +932,7 @@ private struct AutoResizingTextView: NSViewRepresentable {
 
 // 改动1 & 2: 圆角矩形输入框，VStack布局
 private struct ChatInputBar: View {
+    @Environment(\.themeColor) private var themeColor
     @Binding var inputText: String
     let isStreaming: Bool
     let canSend: Bool
@@ -939,7 +964,7 @@ private struct ChatInputBar: View {
                 Button(action: onSend) {
                     Image(systemName: isStreaming ? "stop.circle.fill" : "arrow.up.circle.fill")
                         .font(.title2)
-                        .foregroundStyle(canSend ? Color.accentColor : .secondary)
+                        .foregroundStyle(canSend ? themeColor : .secondary)
                 }
                 .buttonStyle(.plain)
                 .disabled(!canSend)
@@ -1013,6 +1038,7 @@ private struct AttachmentChip: View {
 }
 
 private struct SlashCommandMenu: View {
+    @Environment(\.themeColor) private var themeColor
     let commands: [SlashCommand]
     let selectedIndex: Int
     let onSelect: (SlashCommand) -> Void
@@ -1030,7 +1056,7 @@ private struct SlashCommandMenu: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(index == selectedIndex ? Color.accentColor.opacity(0.15) : .clear)
+                    .background(index == selectedIndex ? themeColor.opacity(0.15) : .clear)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
@@ -1046,6 +1072,7 @@ private struct SlashCommandMenu: View {
 
 // 改动3 & 4: isLastMessage参数，截断按钮移到气泡内右下角
 private struct MessageBubble: View {
+    @Environment(\.themeColor) private var themeColor
     @Environment(\.colorScheme) private var colorScheme
     let message: ChatMessage
     var displayContent: String? = nil
@@ -1236,7 +1263,7 @@ private struct MessageBubble: View {
             return Color.orange.opacity(0.08)
         }
         if message.isUser {
-            return Color.accentColor.opacity(0.15)
+            return themeColor.opacity(0.15)
         }
         if message.isAssistant {
             return assistantBubbleBackgroundColor
@@ -1244,7 +1271,10 @@ private struct MessageBubble: View {
         return Color(.controlBackgroundColor)
     }
 
+    private static let perfLoggingEnabled = false
+
     private func perfLog(_ message: String) {
+        guard Self.perfLoggingEnabled else { return }
         NSLog("\(Self.perfPrefix) %@", message)
     }
 
@@ -1384,7 +1414,7 @@ private struct MessageBubble: View {
                         Spacer()
                         Button(isExpanded ? "收起" : "查看全部") { onToggleExpand() }
                             .font(.caption)
-                            .foregroundStyle(.blue)
+                            .foregroundStyle(themeColor)
                             .buttonStyle(.plain)
                     }
                 }

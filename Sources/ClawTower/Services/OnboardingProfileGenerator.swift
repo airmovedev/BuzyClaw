@@ -514,7 +514,7 @@ struct OnboardingProfileGenerator {
             "status": "todo",
             "priority": "medium",
             "source": "系统引导",
-            "context": "这是你的第一个任务！打开主对话，跟你的 AI 合伙人聊聊天，让 TA 了解你的工作和目标。",
+            "context": "为了我们能够今后更好的配合，你还需要了解我哪方面的信息？",
             "createdAt": "\(now)",
             "updatedAt": "\(now)"
           },
@@ -524,7 +524,47 @@ struct OnboardingProfileGenerator {
             "status": "todo",
             "priority": "low",
             "source": "系统引导",
-            "context": "在对话中描述你想做的项目，AI 合伙人会帮你梳理需求并在 Projects 目录下创建项目文档。完成后可以删除示例项目。",
+            "context": "我想创建一个新项目，请帮我梳理需求并建立项目文档。",
+            "createdAt": "\(now)",
+            "updatedAt": "\(now)"
+          },
+          {
+            "id": "\(UUID().uuidString)",
+            "title": "设一个每日早报提醒",
+            "status": "todo",
+            "priority": "medium",
+            "source": "系统引导",
+            "context": "帮我创建一个每天早上9点的定时任务，内容是：汇总今天的待办事项和日程安排，给我一份简洁的早报。",
+            "createdAt": "\(now)",
+            "updatedAt": "\(now)"
+          },
+          {
+            "id": "\(UUID().uuidString)",
+            "title": "试试让 AI 帮你搜索和总结信息",
+            "status": "todo",
+            "priority": "low",
+            "source": "系统引导",
+            "context": "帮我搜索一下最近科技领域有什么重要新闻，总结成几条要点给我。",
+            "createdAt": "\(now)",
+            "updatedAt": "\(now)"
+          },
+          {
+            "id": "\(UUID().uuidString)",
+            "title": "让 AI 帮你写一封邮件或消息",
+            "status": "todo",
+            "priority": "low",
+            "source": "系统引导",
+            "context": "帮我写一封简短的工作邮件，主题是项目进展汇报，语气要专业但友好。",
+            "createdAt": "\(now)",
+            "updatedAt": "\(now)"
+          },
+          {
+            "id": "\(UUID().uuidString)",
+            "title": "探索 AI 合伙人还能做什么",
+            "status": "todo",
+            "priority": "low",
+            "source": "系统引导",
+            "context": "你都能帮我做哪些事情？请列举你最擅长的能力和使用场景，让我了解怎么更好地利用你。",
             "createdAt": "\(now)",
             "updatedAt": "\(now)"
           }

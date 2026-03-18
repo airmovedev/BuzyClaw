@@ -27,3 +27,14 @@ Package.resolved
 SupportFiles/Info.plist
 SupportFiles/ClawTower.entitlements
 Resources/runtime/
+
+## Secrets
+AuthKey_*.p8
+*.p12
+
+## Claude / Codex cache
+.claude/
+.codex-xcode/
+
+## Sketch source
+*.sketch

@@ -14,6 +14,10 @@ final class CloudKitRelayService {
     var lastSyncDate: Date?
     var lastError: String?
     var pendingMessageCount = 0
+    var isQuotaExceeded = false
+    /// True when Gateway tools (sessions_history/cron) are persistently failing,
+    /// typically due to an internal token mismatch. Gateway restart may be needed.
+    var hasToolSyncIssue = false
 
     // MARK: - Private
 
@@ -199,6 +203,7 @@ final class CloudKitRelayService {
         pollingTask = Task { [weak self] in
             var cronElapsedSeconds = 0
             var sessionHistoryElapsedSeconds = 0
+            var toolBackoffRetrySeconds = 0
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
                 guard !Task.isCancelled else { break }
@@ -208,6 +213,23 @@ final class CloudKitRelayService {
 
                 cronElapsedSeconds += 3
                 sessionHistoryElapsedSeconds += 3
+                toolBackoffRetrySeconds += 3
+
+                // Sync tool error state from relay client
+                if let client = self.relayClient {
+                    let backoff = await client.hasToolErrorBackoff
+                    if self.hasToolSyncIssue != backoff {
+                        self.hasToolSyncIssue = backoff
+                    }
+                }
+
+                // Periodically reset tool error backoff so we retry after ~2 minutes
+                if toolBackoffRetrySeconds >= 120 {
+                    toolBackoffRetrySeconds = 0
+                    await self.relayClient?.resetToolErrors()
+                    self.hasToolSyncIssue = false
+                }
+
                 if cronElapsedSeconds >= 10 {
                     cronElapsedSeconds = 0
                     await self.pollCronRuns()
@@ -529,6 +551,10 @@ final class CloudKitRelayService {
             if hasNewSyncedIDs {
                 saveSyncedCronRunIDs(syncedCronRunIDs)
             }
+        } catch let ckError as CKError where ckError.code == .quotaExceeded {
+            logger.error("iCloud quota exceeded during cron run sync")
+            lastError = "iCloud 空间不足，无法同步消息"
+            isQuotaExceeded = true
         } catch {
             logger.error("Cron runs poll failed: \(error.localizedDescription)")
         }
@@ -570,6 +596,10 @@ final class CloudKitRelayService {
                     sessionSyncedIDs = Set(sessionSyncedIDs.suffix(200))
                 }
                 syncedGatewayMessageIDs[sessionKey] = sessionSyncedIDs
+            } catch let ckError as CKError where ckError.code == .quotaExceeded {
+                logger.error("iCloud quota exceeded during session history sync")
+                lastError = "iCloud 空间不足，无法同步消息"
+                isQuotaExceeded = true
             } catch {
                 logger.error("Session history poll failed for \(sessionKey): \(error.localizedDescription)")
             }
@@ -775,8 +805,14 @@ final class CloudKitRelayService {
             )
             NSLog("[CloudKitRelay] Gateway responded: %d chars", response.count)
 
+            // Extract image file paths from AI response and attach as CKAsset
+            let (responseImageAsset, responseTempURL) = Self.extractImageAssetFromResponse(response)
+            if responseImageAsset != nil {
+                NSLog("[CloudKitRelay] 🖼️ Found image in AI response, attaching as CKAsset")
+            }
+
             // 1. Write response FIRST as a new record (independent of ACK)
-            let responseMessage = MessageRecord(
+            var responseMessage = MessageRecord(
                 id: UUID().uuidString,
                 sessionKey: message.sessionKey,
                 direction: .fromGateway,
@@ -785,8 +821,13 @@ final class CloudKitRelayService {
                 timestamp: Date(),
                 metadata: message.metadata
             )
-            NSLog("[CloudKitRelay] Writing response to CloudKit: id=%@", responseMessage.id)
+            responseMessage.imageAsset = responseImageAsset
+            NSLog("[CloudKitRelay] Writing response to CloudKit: id=%@ hasImage=%d", responseMessage.id, responseImageAsset != nil ? 1 : 0)
             try await database.save(responseMessage.toCKRecord())
+            // Clean up temp file after save
+            if let responseTempURL {
+                try? FileManager.default.removeItem(at: responseTempURL)
+            }
             NSLog("[CloudKitRelay] ✅ Response saved to CloudKit")
 
             // Advance session history cursor to avoid re-importing this response
@@ -809,12 +850,95 @@ final class CloudKitRelayService {
             }
 
             logger.info("Relayed message \(message.id), response written")
+            isQuotaExceeded = false
+        } catch let ckError as CKError where ckError.code == .quotaExceeded {
+            NSLog("[CloudKitRelay] ❌ iCloud quota exceeded for message %@", message.id)
+            logger.error("iCloud quota exceeded — cannot save relay response")
+            await messageGuard.release(messageID: message.id)
+            lastError = "iCloud 空间不足，无法同步消息"
+            isQuotaExceeded = true
         } catch {
             NSLog("[CloudKitRelay] Relay failed for %@: %@", message.id, error.localizedDescription)
             logger.error("Failed to relay message \(message.id): \(error.localizedDescription)")
             await messageGuard.release(messageID: message.id)
             lastError = error.localizedDescription
         }
+    }
+
+    // MARK: - Image extraction from AI response
+
+    /// Scans the AI response text for local image file paths and returns a CKAsset if found.
+    /// Supports markdown image syntax, absolute paths, and tilde paths.
+    /// Returns (CKAsset, tempFileURL) — caller should delete tempFileURL after CloudKit save.
+    private static func extractImageAssetFromResponse(_ response: String) -> (CKAsset?, URL?) {
+        let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "heic"]
+        let fm = FileManager.default
+
+        var candidatePaths: [String] = []
+
+        // Markdown images: ![...]( /path/to/file.ext )
+        let markdownPattern = try? NSRegularExpression(pattern: #"!\[.*?\]\((/[^)]+)\)"#)
+        if let matches = markdownPattern?.matches(in: response, range: NSRange(response.startIndex..., in: response)) {
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: response) {
+                    candidatePaths.append(String(response[range]).trimmingCharacters(in: .whitespaces))
+                }
+            }
+        }
+
+        // Bare absolute paths: /Users/... or /tmp/... or /var/... ending with image extension
+        let pathPattern = try? NSRegularExpression(pattern: #"(?:^|[\s`\"'(])(/(?:Users|tmp|var|private)[^\s`\"')]*\.(?:png|jpg|jpeg|gif|webp|bmp|tiff|heic))"#, options: [.caseInsensitive])
+        if let matches = pathPattern?.matches(in: response, range: NSRange(response.startIndex..., in: response)) {
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: response) {
+                    candidatePaths.append(String(response[range]).trimmingCharacters(in: .whitespaces))
+                }
+            }
+        }
+
+        // Tilde paths: ~/Desktop/image.png
+        let tildePattern = try? NSRegularExpression(pattern: #"(?:^|[\s`\"'(])(~/[^\s`\"')]*\.(?:png|jpg|jpeg|gif|webp|bmp|tiff|heic))"#, options: [.caseInsensitive])
+        if let matches = tildePattern?.matches(in: response, range: NSRange(response.startIndex..., in: response)) {
+            for match in matches {
+                if let range = Range(match.range(at: 1), in: response) {
+                    let tildePath = String(response[range]).trimmingCharacters(in: .whitespaces)
+                    candidatePaths.append(NSString(string: tildePath).expandingTildeInPath)
+                }
+            }
+        }
+
+        // Deduplicate and try each candidate
+        var seen = Set<String>()
+        for path in candidatePaths {
+            guard seen.insert(path).inserted else { continue }
+
+            let ext = (path as NSString).pathExtension.lowercased()
+            guard imageExtensions.contains(ext) else { continue }
+            guard fm.fileExists(atPath: path) else {
+                NSLog("[CloudKitRelay] 🖼️ Candidate image path not found: %@", path)
+                continue
+            }
+
+            guard let imageData = fm.contents(atPath: path) else {
+                NSLog("[CloudKitRelay] 🖼️ Could not read image at: %@", path)
+                continue
+            }
+
+            NSLog("[CloudKitRelay] 🖼️ Found image in response: %@ (%d bytes)", path, imageData.count)
+
+            // Write to temp file for CKAsset (CKAsset supports large files natively)
+            let tempURL = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
+            do {
+                try imageData.write(to: tempURL)
+                let asset = CKAsset(fileURL: tempURL)
+                return (asset, tempURL)
+            } catch {
+                NSLog("[CloudKitRelay] 🖼️ Failed to write temp image: %@", error.localizedDescription)
+                continue
+            }
+        }
+
+        return (nil, nil)
     }
 
     // MARK: - CKSyncEngine handling

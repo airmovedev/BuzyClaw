@@ -6,15 +6,19 @@ struct MobileChatView: View {
     let agentId: String
     let agentName: String
 
+    @Environment(\.themeColor) private var themeColor
     @Environment(CloudKitMessageClient.self) private var messageClient
     @Environment(DashboardSnapshotStore.self) private var snapshotStore
+    @Environment(SpeechRecognitionService.self) private var speechService
     @State private var inputText = ""
     @State private var isSending = false
     @State private var showSessionPicker = false
+    @State private var showPermissionAlert = false
     @FocusState private var isInputFocused: Bool
     @State private var pendingImageData: Data?
     @State private var pendingImagePreview: UIImage?
     @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var voiceGlowOpacity: Double = 1.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,20 +44,10 @@ struct MobileChatView: View {
                 }
             }
             ToolbarItem(placement: .topBarTrailing) {
-                HStack(spacing: 16) {
-                    Button {
-                        let shortId = UUID().uuidString.prefix(8).lowercased()
-                        let newKey = "agent:\(agentId):mobile-\(shortId)"
-                        messageClient.selectSession(newKey)
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-
-                    NavigationLink {
-                        AgentDetailView(agentId: agentId, fallbackName: agentName)
-                    } label: {
-                        Image(systemName: "info.circle")
-                    }
+                NavigationLink {
+                    AgentDetailView(agentId: agentId, fallbackName: agentName)
+                } label: {
+                    Image(systemName: "info.circle")
                 }
             }
         }
@@ -75,10 +69,23 @@ struct MobileChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 12) {
-                    if messageClient.messages.isEmpty {
+                    if messageClient.allSessionMessages.isEmpty {
                         emptyState
                     } else {
-                        let messages = messageClient.messages
+                        // "Load more" button at the top
+                        if messageClient.hasMoreMessages {
+                            Button {
+                                messageClient.loadMoreMessages()
+                            } label: {
+                                Text("加载更早的消息")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.vertical, 8)
+                            }
+                            .id("load-more")
+                        }
+
+                        let messages = messageClient.displayedMessages
                         ForEach(Array(messages.enumerated()), id: \.element.id) { index, message in
                             let shouldTruncate = index < messages.count - 3
                             MobileMessageBubble(message: message, shouldTruncate: shouldTruncate)
@@ -95,13 +102,13 @@ struct MobileChatView: View {
                 .padding()
             }
             .defaultScrollAnchor(.bottom)
-            .onChange(of: messageClient.messages.count) {
+            .onChange(of: messageClient.allSessionMessages.count) {
                 scrollToBottom(proxy: proxy)
             }
             .onChange(of: messageClient.isWaitingForReply) {
                 scrollToBottom(proxy: proxy)
             }
-            .onChange(of: messageClient.messages.last?.status) {
+            .onChange(of: messageClient.allSessionMessages.last?.status) {
                 scrollToBottom(proxy: proxy)
             }
         }
@@ -111,7 +118,7 @@ struct MobileChatView: View {
         withAnimation(.easeOut(duration: 0.3)) {
             if messageClient.isWaitingForReply {
                 proxy.scrollTo("typing-indicator", anchor: .bottom)
-            } else if let last = messageClient.messages.last {
+            } else if let last = messageClient.displayedMessages.last {
                 proxy.scrollTo(last.id, anchor: .bottom)
             }
         }
@@ -123,18 +130,83 @@ struct MobileChatView: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 48))
                 .foregroundStyle(.quaternary)
-            Text("通过 iCloud 向 Gateway 发送消息")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Text("确保 macOS ClawTower 正在运行")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            if !snapshotStore.isMacOSConnected {
+                Text("guide.chat.ready")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Text("guide.chat.sync_hint")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                Text("通过 iCloud 向 Gateway 发送消息")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
         }
+    }
+
+    /// Whether voice input is currently active.
+    private var isVoiceActive: Bool {
+        speechService.state == .recording
     }
 
     // MARK: - Input Bar
 
     private var inputBar: some View {
+        VStack(spacing: 0) {
+            if !snapshotStore.isMacOSConnected {
+                // Disconnected state: show neutral guidance
+                VStack(spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "desktopcomputer")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                        Text("guide.chat.input_hint")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("guide.chat.input_detail")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(.bar)
+            } else {
+                normalInputBar
+            }
+        }
+        .background(.bar)
+        .onChange(of: speechService.liveText) { _, newText in
+            if isVoiceActive {
+                inputText = newText
+            }
+        }
+        .onChange(of: speechService.state) { oldState, newState in
+            if newState == .recording {
+                startVoiceGlow()
+            } else if oldState == .recording {
+                stopVoiceGlow()
+                // Clear liveText so stale transcription doesn't leak back into inputText
+                // (e.g. when user clears the field then dismisses keyboard)
+                speechService.liveText = ""
+            }
+        }
+        .alert("需要麦克风权限", isPresented: $showPermissionAlert) {
+            Button("去设置") {
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("请在设置中允许虾忙访问麦克风，以便使用语音输入")
+        }
+    }
+
+    // MARK: - Normal Input Bar
+
+    private var normalInputBar: some View {
         VStack(spacing: 0) {
             // Pending image preview
             if let uiImage = pendingImagePreview {
@@ -163,9 +235,14 @@ struct MobileChatView: View {
 
             HStack(spacing: 8) {
                 PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.secondary)
+                    ZStack {
+                        Circle()
+                            .stroke(themeColor.opacity(0.3), lineWidth: 1.5)
+                            .frame(width: 36, height: 36)
+                        Image(systemName: "paperclip")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(themeColor)
+                    }
                 }
                 .onChange(of: selectedPhotoItem) { _, newItem in
                     guard let newItem else { return }
@@ -173,28 +250,66 @@ struct MobileChatView: View {
                     selectedPhotoItem = nil
                 }
 
-                TextField("输入消息...", text: $inputText, axis: .vertical)
+                TextField(isVoiceActive ? String(localized: "voice.listening_hint") : "输入消息...", text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .lineLimit(1...5)
+                    .lineLimit(1...8)
                     .focused($isInputFocused)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 20))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20)
+                            .stroke(themeColor, lineWidth: isVoiceActive ? 2 : 0)
+                            .opacity(isVoiceActive ? voiceGlowOpacity : 0)
+                    )
                     .onSubmit { sendIfReady() }
+                    .disabled(isVoiceActive)
 
-                Button {
-                    sendIfReady()
-                } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 32))
-                        .foregroundStyle(canSend ? Color.accentColor : .secondary)
+                if isVoiceActive {
+                    // Recording: show stop button
+                    Button {
+                        speechService.stopRecording()
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.red, lineWidth: 1.5)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.red)
+                        }
+                    }
+                } else if canSend {
+                    Button {
+                        sendIfReady()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(themeColor)
+                    }
+                } else if speechService.state == .loading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 36, height: 36)
+                } else {
+                    Button {
+                        Task { await startVoiceInput() }
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .stroke(speechService.isModelReady ? themeColor.opacity(0.3) : themeColor.opacity(0.1), lineWidth: 1.5)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(speechService.isModelReady ? themeColor : themeColor.opacity(0.2))
+                        }
+                    }
+                    .disabled(!speechService.isModelReady)
                 }
-                .disabled(!canSend)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
-        .background(.bar)
     }
 
     private var canSend: Bool {
@@ -232,6 +347,29 @@ struct MobileChatView: View {
                 await messageClient.sendMessage(contentText)
             }
             isSending = false
+        }
+    }
+
+    // MARK: - Voice Input
+
+    private func startVoiceInput() async {
+        let granted = await speechService.requestPermissions()
+        guard granted else {
+            showPermissionAlert = true
+            return
+        }
+        speechService.startRecording()
+    }
+
+    private func startVoiceGlow() {
+        withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+            voiceGlowOpacity = 0.3
+        }
+    }
+
+    private func stopVoiceGlow() {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            voiceGlowOpacity = 1.0
         }
     }
 
@@ -292,6 +430,7 @@ struct MobileChatView: View {
 struct SessionPickerView: View {
     let agentId: String
     let agentName: String
+    @Environment(\.themeColor) private var themeColor
     @Environment(CloudKitMessageClient.self) private var messageClient
     @Environment(DashboardSnapshotStore.self) private var snapshotStore
     @Environment(\.dismiss) private var dismiss
@@ -400,7 +539,7 @@ struct SessionPickerView: View {
 
                 if key == messageClient.currentSessionKey {
                     Image(systemName: "checkmark")
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(themeColor)
                 }
             }
         }
@@ -428,10 +567,13 @@ struct MobileMessageBubble: View {
     let message: MessageRecord
     var shouldTruncate: Bool = true
 
+    @Environment(\.themeColor) private var themeColor
     @Environment(CloudKitMessageClient.self) private var messageClient
+    @Namespace private var imageTransitionNS
 
     private var isUser: Bool { message.direction == .toGateway }
     @State private var isExpanded = false
+    @State private var fullscreenImage: UIImage?
 
     private var timestampText: String {
         let formatter = DateFormatter()
@@ -440,12 +582,17 @@ struct MobileMessageBubble: View {
     }
 
     private var attachmentImages: [UIImage] {
-        // Priority 1: CKAsset image
+        // Priority 1: CKAsset image (live CloudKit cache)
         if let asset = message.imageAsset, let fileURL = asset.fileURL,
            let data = try? Data(contentsOf: fileURL), let img = UIImage(data: data) {
             return [img]
         }
-        // Priority 2: Legacy base64 data URL in metadata (backward compat)
+        // Priority 2: Locally persisted image cache
+        if let cachedData = CloudKitMessageClient.cachedImageData(for: message.id),
+           let img = UIImage(data: cachedData) {
+            return [img]
+        }
+        // Priority 3: Legacy base64 data URL in metadata (backward compat)
         guard let data = message.metadata.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let attachments = json["attachments"] as? [[String: Any]] else {
@@ -470,6 +617,8 @@ struct MobileMessageBubble: View {
                         .scaledToFit()
                         .frame(maxWidth: 200)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .matchedTransitionSource(id: "imageViewer", in: imageTransitionNS)
+                        .onTapGesture { fullscreenImage = img }
                 }
 
                 if isUser {
@@ -477,7 +626,7 @@ struct MobileMessageBubble: View {
                         Text(message.content)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
-                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 16))
+                            .background(themeColor, in: RoundedRectangle(cornerRadius: 16))
                             .foregroundStyle(.white)
                     }
                 } else {
@@ -495,6 +644,15 @@ struct MobileMessageBubble: View {
             }
 
             if !isUser { Spacer(minLength: 60) }
+        }
+        .fullScreenCover(isPresented: Binding(
+            get: { fullscreenImage != nil },
+            set: { if !$0 { fullscreenImage = nil } }
+        )) {
+            if let img = fullscreenImage {
+                ImageViewerSheet(image: img)
+                    .navigationTransition(.zoom(sourceID: "imageViewer", in: imageTransitionNS))
+            }
         }
     }
 
@@ -548,6 +706,157 @@ struct MobileMessageBubble: View {
     }
 }
 
+// MARK: - Fullscreen Image Viewer
+
+private struct ImageViewerSheet: View {
+    let image: UIImage
+    @Environment(\.dismiss) private var dismiss
+    @State private var showShareSheet = false
+    @State private var savedToPhotos = false
+    @State private var saveError: String?
+
+    // Pinch-to-zoom state
+    @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .gesture(
+                    MagnifyGesture()
+                        .onChanged { value in
+                            let newScale = lastScale * value.magnification
+                            scale = max(1.0, min(newScale, 5.0))
+                        }
+                        .onEnded { _ in
+                            if scale <= 1.0 {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    scale = 1.0
+                                    offset = .zero
+                                    lastOffset = .zero
+                                }
+                            }
+                            lastScale = scale
+                        }
+                        .simultaneously(with:
+                            DragGesture()
+                                .onChanged { value in
+                                    guard scale > 1.0 else { return }
+                                    offset = CGSize(
+                                        width: lastOffset.width + value.translation.width,
+                                        height: lastOffset.height + value.translation.height
+                                    )
+                                }
+                                .onEnded { _ in
+                                    lastOffset = offset
+                                }
+                        )
+                )
+                .onTapGesture(count: 2) {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        if scale > 1.0 {
+                            scale = 1.0
+                            lastScale = 1.0
+                            offset = .zero
+                            lastOffset = .zero
+                        } else {
+                            scale = 2.5
+                            lastScale = 2.5
+                        }
+                    }
+                }
+                .ignoresSafeArea(edges: .bottom)
+        }
+        .overlay(alignment: .topLeading) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .glassCircleButton()
+            .padding(.leading, 8)
+            .padding(.top, 4)
+        }
+        .overlay(alignment: .topTrailing) {
+            Menu {
+                Button {
+                    saveToPhotos()
+                } label: {
+                    Label("保存到相册", systemImage: "photo.on.rectangle")
+                }
+                Button {
+                    showShareSheet = true
+                } label: {
+                    Label("分享 / 存储到文件", systemImage: "square.and.arrow.up")
+                }
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .glassCircleButton()
+            .padding(.trailing, 8)
+            .padding(.top, 4)
+        }
+        .overlay(alignment: .bottom) {
+            if savedToPhotos {
+                Text("已保存到相册")
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.green, in: Capsule())
+                    .padding(.bottom, 40)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+            if let error = saveError {
+                Text(error)
+                    .font(.subheadline.bold())
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.red, in: Capsule())
+                    .padding(.bottom, 40)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut, value: savedToPhotos)
+        .animation(.easeInOut, value: saveError)
+        .sheet(isPresented: $showShareSheet) {
+            ShareSheet(items: [image])
+        }
+    }
+
+    private func saveToPhotos() {
+        UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
+        savedToPhotos = true
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            savedToPhotos = false
+        }
+    }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 private func imageFromDataURL(_ dataURL: String) -> UIImage? {
     guard dataURL.hasPrefix("data:"),
           let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
@@ -563,3 +872,23 @@ private func mobileMarkdownAttributedString(_ string: String) -> AttributedStrin
         return AttributedString(string)
     }
 }
+
+// MARK: - Liquid Glass circle button helper
+
+private extension View {
+    @ViewBuilder
+    func glassCircleButton() -> some View {
+        if #available(iOS 26, *) {
+            self
+                .buttonStyle(.borderless)
+                .foregroundStyle(.white)
+                .glassEffect(.regular.interactive(), in: .circle)
+        } else {
+            self
+                .foregroundStyle(.white)
+                .background(.white.opacity(0.2), in: Circle())
+        }
+    }
+}
+
+

@@ -3,6 +3,7 @@ import MarkdownUI
 import SwiftUI
 
 struct SecondBrainView: View {
+    @Environment(\.themeColor) private var themeColor
     private let viewTitle = "记忆中枢"
     @State private var documents: [SecondBrainDocument] = []
     @State private var selectedDocument: SecondBrainDocument?
@@ -21,6 +22,11 @@ struct SecondBrainView: View {
     @State private var isEditing = false
     @State private var editingContent: String = ""
     @State private var isSaving = false
+
+    // New document
+    @State private var showNewDocPopover = false
+    @State private var newDocName: String = ""
+    @State private var newDocGroup: String = "memory"
 
     let basePath: URL
 
@@ -43,6 +49,41 @@ struct SecondBrainView: View {
             stopWatching()
         }
         .navigationTitle(viewTitle)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if let document = selectedDocument {
+                    if !document.isImage {
+                        if isEditing {
+                            Button("取消") {
+                                cancelEditing()
+                            }
+
+                            Button {
+                                saveDocument()
+                            } label: {
+                                Label("保存", systemImage: "square.and.arrow.down")
+                            }
+                            .tint(themeColor)
+                            .disabled(isSaving)
+                        } else {
+                            Button {
+                                startEditing()
+                            } label: {
+                                Label("编辑", systemImage: "pencil")
+                            }
+                            .help("编辑文档")
+                        }
+                    }
+
+                    Button {
+                        NSWorkspace.shared.activateFileViewerSelecting([document.filePath])
+                    } label: {
+                        Label("在 Finder 中显示", systemImage: "folder")
+                    }
+                    .help("在 Finder 中显示")
+                }
+            }
+        }
     }
 
     // MARK: - Filtered Documents
@@ -109,24 +150,40 @@ struct SecondBrainView: View {
     @ViewBuilder
     private var fileListPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Search bar
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("搜索文档…", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+            // Search bar + New document button
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("搜索文档…", text: $searchText)
+                        .textFieldStyle(.plain)
+                    if !searchText.isEmpty {
+                        Button {
+                            searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(8)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+
+                Button {
+                    newDocName = ""
+                    newDocGroup = selectedCategory != "全部" ? selectedCategory : "memory"
+                    showNewDocPopover = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.body)
+                }
+                .buttonStyle(.plain)
+                .help("新建文档")
+                .popover(isPresented: $showNewDocPopover, arrowEdge: .bottom) {
+                    newDocPopover
                 }
             }
-            .padding(8)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
             .padding(.horizontal)
             .padding(.top, 12)
             .padding(.bottom, 8)
@@ -167,11 +224,19 @@ struct SecondBrainView: View {
                     Text(error)
                 }
             } else if documents.isEmpty {
-                ContentUnavailableView {
-                    Label("暂无文档", systemImage: "doc.text")
-                } description: {
-                    Text("~/.openclaw/workspace/second-brain/ 目录下没有 .md 文件")
+                VStack(spacing: 12) {
+                    Spacer()
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.secondary)
+                    Text("AI 助手会在对话中自动积累记忆，也可以手动添加文档")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Spacer()
                 }
+                .frame(maxWidth: .infinity)
+                .padding(40)
             } else if filteredDocuments.isEmpty {
                 ContentUnavailableView {
                     Label("无匹配结果", systemImage: "magnifyingglass")
@@ -251,36 +316,6 @@ struct SecondBrainView: View {
                         .foregroundStyle(.secondary)
                     }
                     Spacer()
-
-                    // Edit / Save / Cancel buttons (only for .md files)
-                    if !document.isImage {
-                        if isEditing {
-                            Button("取消") {
-                                cancelEditing()
-                            }
-
-                            Button("保存") {
-                                saveDocument()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(isSaving)
-                        } else {
-                            Button {
-                                startEditing()
-                            } label: {
-                                Image(systemName: "pencil")
-                            }
-                            .help("编辑文档")
-                        }
-                    }
-
-                    Button {
-                        NSWorkspace.shared.activateFileViewerSelecting([document.filePath])
-                    } label: {
-                        Image(systemName: "folder.badge.arrow.forward")
-                    }
-                    .help("在 Finder 中显示")
-                    .fixedSize()
                 }
                 .padding()
 
@@ -304,7 +339,19 @@ struct SecondBrainView: View {
                 }
             }
         } else {
-            ContentUnavailableView("选择一个文档查看", systemImage: "doc.text.magnifyingglass")
+            VStack(spacing: 12) {
+                Spacer()
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("选择一个文档查看")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(40)
         }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -377,6 +424,80 @@ struct SecondBrainView: View {
                 editingContent = ""
                 isSaving = false
             }
+        }
+    }
+
+    // MARK: - New Document
+
+    private var newDocPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("新建文档")
+                .font(.headline)
+
+            TextField("文档名称", text: $newDocName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 240)
+
+            Picker("分组", selection: $newDocGroup) {
+                ForEach(categories.filter { $0 != "全部" }, id: \.self) { cat in
+                    Text(cat).tag(cat)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            HStack {
+                Spacer()
+                Button("取消") {
+                    showNewDocPopover = false
+                }
+                Button("创建") {
+                    createNewDocument()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(themeColor)
+                .disabled(newDocName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 300)
+    }
+
+    private func createNewDocument() {
+        let name = newDocName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+
+        let safeName = name.hasSuffix(".md") ? name : "\(name).md"
+        let groupDir = baseDir.appendingPathComponent(newDocGroup)
+        let fileURL = groupDir.appendingPathComponent(safeName)
+
+        let fm = FileManager.default
+        // Ensure the group directory exists
+        if !fm.fileExists(atPath: groupDir.path) {
+            try? fm.createDirectory(at: groupDir, withIntermediateDirectories: true)
+        }
+
+        // Don't overwrite existing files
+        guard !fm.fileExists(atPath: fileURL.path) else {
+            showNewDocPopover = false
+            // Select the existing file
+            if let existing = documents.first(where: { $0.filePath == fileURL }) {
+                selectDocument(existing)
+            }
+            return
+        }
+
+        // Create the file with a default heading
+        let initialContent = "# \(name.replacingOccurrences(of: ".md", with: ""))\n\n"
+        try? initialContent.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        showNewDocPopover = false
+
+        // Reload to pick up the new file, then select and start editing
+        loadDocuments()
+        if let newDoc = documents.first(where: { $0.filePath == fileURL }) {
+            expandedGroups.insert(newDocGroup)
+            selectDocument(newDoc)
+            startEditing()
         }
     }
 

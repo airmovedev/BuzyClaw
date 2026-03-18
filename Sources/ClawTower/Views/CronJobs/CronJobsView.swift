@@ -39,19 +39,38 @@ struct CronJobsView: View {
                     .padding(.vertical, 8)
                 }
 
-                // Agent columns
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(alignment: .top, spacing: 16) {
+                if jobs.isEmpty && !isLoading && errorMessage == nil {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        Image(systemName: "clock.badge.questionmark")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        Text("直接告诉 AI 助手或点击右上角 ＋ 来新增定时提醒")
+                            .font(.title3)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(40)
+                } else {
+                    let columns = [
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12),
+                        GridItem(.flexible(), spacing: 12),
+                    ]
+                    VStack(alignment: .leading, spacing: 20) {
                         ForEach(groupedJobs, id: \.agentId) { group in
-                            VStack(alignment: .leading, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 10) {
                                 Text("\(agentDisplayName(group.agentId)) (\(group.jobs.count))")
                                     .font(.headline)
                                     .padding(.horizontal, 4)
-                                ForEach(group.jobs) { job in
-                                    CronJobCardView(job: job, client: client, onRefresh: { Task { await loadJobs() } })
+                                LazyVGrid(columns: columns, spacing: 12) {
+                                    ForEach(group.jobs) { job in
+                                        CronJobCardView(job: job, client: client, onRefresh: { Task { await loadJobs() } })
+                                    }
                                 }
                             }
-                            .frame(width: 320)
                         }
                     }
                     .padding()
@@ -69,7 +88,7 @@ struct CronJobsView: View {
             }
         }
         .sheet(isPresented: $showCreateSheet) {
-            CreateCronJobSheet(client: client) {
+            CronJobFormSheet(client: client) {
                 Task { await loadJobs() }
             }
         }
@@ -145,12 +164,14 @@ struct CronJobsView: View {
 // MARK: - Card View
 
 private struct CronJobCardView: View {
+    @Environment(\.themeColor) private var themeColor
     let job: CronJob
     let client: GatewayClient
     let onRefresh: () -> Void
 
     @State private var showFullMessage = false
     @State private var showDeleteAlert = false
+    @State private var showEditSheet = false
     @State private var isToggling = false
 
     private var statusDotColor: Color {
@@ -206,7 +227,7 @@ private struct CronJobCardView: View {
                     }
                     .font(.caption2)
                     .buttonStyle(.plain)
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(themeColor)
                 }
             }
 
@@ -222,6 +243,12 @@ private struct CronJobCardView: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
+                Button("编辑") {
+                    showEditSheet = true
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
 
                 Spacer()
 
@@ -247,17 +274,22 @@ private struct CronJobCardView: View {
         } message: {
             Text("确定要删除定时任务「\(job.name)」吗？此操作不可撤销。")
         }
+        .sheet(isPresented: $showEditSheet) {
+            CronJobFormSheet(client: client, editingJob: job, onSaved: onRefresh)
+        }
     }
 
 }
 
-// MARK: - Create Cron Job Sheet
+// MARK: - Cron Job Form Sheet (Create / Edit)
 
-private struct CreateCronJobSheet: View {
+private struct CronJobFormSheet: View {
     let client: GatewayClient
-    let onCreated: () -> Void
+    let editingJob: CronJob?
+    let onSaved: () -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.themeColor) private var themeColor
 
     @State private var jobName = ""
     @State private var selectedAgentId = "main"
@@ -267,8 +299,30 @@ private struct CreateCronJobSheet: View {
     @State private var intervalHours = 4
     @State private var customCron = ""
     @State private var taskContent = ""
-    @State private var isCreating = false
-    @State private var createError: String?
+    @State private var isSaving = false
+    @State private var saveError: String?
+
+    private var isEditMode: Bool { editingJob != nil }
+
+    init(client: GatewayClient, editingJob: CronJob? = nil, onSaved: @escaping () -> Void) {
+        self.client = client
+        self.editingJob = editingJob
+        self.onSaved = onSaved
+
+        if let job = editingJob {
+            _jobName = State(initialValue: job.name)
+            _selectedAgentId = State(initialValue: job.agentId)
+            _taskContent = State(initialValue: job.message)
+
+            // Parse existing cron expression back to schedule type
+            let parsed = Self.parseSchedule(job.schedule.expr)
+            _scheduleType = State(initialValue: parsed.type)
+            _dailyHour = State(initialValue: parsed.hour)
+            _dailyMinute = State(initialValue: parsed.minute)
+            _intervalHours = State(initialValue: parsed.interval)
+            _customCron = State(initialValue: parsed.custom)
+        }
+    }
 
     private var agents: [(id: String, label: String)] {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -322,41 +376,31 @@ private struct CreateCronJobSheet: View {
         }
     }
 
-    private var canCreate: Bool {
+    private var canSave: Bool {
         !jobName.trimmingCharacters(in: .whitespaces).isEmpty
         && !taskContent.trimmingCharacters(in: .whitespaces).isEmpty
         && (scheduleType != .custom || !customCron.trimmingCharacters(in: .whitespaces).isEmpty)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Title bar
-            HStack {
-                Text("创建定时任务")
-                    .font(.headline)
-                Spacer()
-                Button("取消") { dismiss() }
-                    .buttonStyle(.plain)
-            }
-            .padding()
-
-            Divider()
-
+        NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    // Job name
-                    VStack(alignment: .leading, spacing: 4) {
+                    // 任务名称
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("任务名称")
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
                         TextField("输入任务名称", text: $jobName)
                             .textFieldStyle(.roundedBorder)
                     }
 
-                    // Agent picker
-                    VStack(alignment: .leading, spacing: 4) {
+                    // Agent
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Agent")
                             .font(.subheadline.weight(.medium))
-                        Picker("Agent", selection: $selectedAgentId) {
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $selectedAgentId) {
                             ForEach(agents, id: \.id) { agent in
                                 Text(agent.label).tag(agent.id)
                             }
@@ -364,19 +408,21 @@ private struct CreateCronJobSheet: View {
                         .labelsHidden()
                     }
 
-                    // Schedule type
-                    VStack(alignment: .leading, spacing: 4) {
+                    // 调度类型
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("调度类型")
                             .font(.subheadline.weight(.medium))
-                        Picker("调度类型", selection: $scheduleType) {
+                            .foregroundStyle(.secondary)
+                        Picker("", selection: $scheduleType) {
                             ForEach(ScheduleType.allCases, id: \.self) { type in
                                 Text(type.rawValue).tag(type)
                             }
                         }
+                        .labelsHidden()
                         .pickerStyle(.segmented)
                     }
 
-                    // Schedule config
+                    // 调度配置
                     switch scheduleType {
                     case .daily:
                         HStack(spacing: 12) {
@@ -384,22 +430,24 @@ private struct CreateCronJobSheet: View {
                                 Text("小时")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Picker("小时", selection: $dailyHour) {
+                                Picker("", selection: $dailyHour) {
                                     ForEach(0..<24, id: \.self) { h in
                                         Text(String(format: "%02d", h)).tag(h)
                                     }
                                 }
+                                .labelsHidden()
                                 .frame(width: 80)
                             }
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("分钟")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                Picker("分钟", selection: $dailyMinute) {
+                                Picker("", selection: $dailyMinute) {
                                     ForEach(Array(stride(from: 0, to: 60, by: 5)), id: \.self) { m in
                                         Text(String(format: "%02d", m)).tag(m)
                                     }
                                 }
+                                .labelsHidden()
                                 .frame(width: 80)
                             }
                         }
@@ -408,11 +456,12 @@ private struct CreateCronJobSheet: View {
                             Text("间隔")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Picker("间隔", selection: $intervalHours) {
+                            Picker("", selection: $intervalHours) {
                                 ForEach(Self.intervalOptions, id: \.self) { h in
                                     Text("每 \(h) 小时").tag(h)
                                 }
                             }
+                            .labelsHidden()
                         }
                     case .custom:
                         VStack(alignment: .leading, spacing: 4) {
@@ -425,56 +474,61 @@ private struct CreateCronJobSheet: View {
                         }
                     }
 
-                    // Preview
+                    // 预览
                     Text("预览: \(cronExpression)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 2)
 
-                    // Task content
-                    VStack(alignment: .leading, spacing: 4) {
+                    // 任务内容
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("任务内容")
                             .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
                         TextEditor(text: $taskContent)
                             .font(.body)
                             .frame(minHeight: 100)
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .background(Color(.textBackgroundColor))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
                                     .stroke(Color.secondary.opacity(0.3), lineWidth: 1)
                             )
                     }
 
-                    if let createError {
-                        Text(createError)
-                            .font(.caption)
+                    if let saveError {
+                        Label(saveError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
+                            .font(.caption)
                     }
-
-                    // Create button
-                    Button {
-                        createJob()
-                    } label: {
-                        if isCreating {
-                            ProgressView()
-                                .controlSize(.small)
-                                .frame(maxWidth: .infinity)
-                        } else {
-                            Text("创建")
-                                .frame(maxWidth: .infinity)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canCreate || isCreating)
                 }
-                .padding()
+                .padding(20)
+            }
+            .navigationTitle(isEditMode ? "编辑定时任务" : "创建定时任务")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if isSaving {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button(isEditMode ? "保存" : "创建") { saveJob() }
+                            .disabled(!canSave)
+                            .tint(themeColor)
+                    }
+                }
             }
         }
-        .frame(width: 420, height: 560)
+        .frame(minWidth: 440, minHeight: 520)
     }
 
-    private func createJob() {
-        isCreating = true
-        createError = nil
+    private func saveJob() {
+        isSaving = true
+        saveError = nil
         Task {
             do {
                 let schedule: [String: Any] = [
@@ -485,18 +539,65 @@ private struct CreateCronJobSheet: View {
                 let payload: [String: Any] = [
                     "message": taskContent.trimmingCharacters(in: .whitespacesAndNewlines)
                 ]
-                try await client.cronCreateJob(
-                    name: jobName.trimmingCharacters(in: .whitespaces),
-                    agentId: selectedAgentId,
-                    schedule: schedule,
-                    payload: payload
-                )
-                onCreated()
+                if let job = editingJob {
+                    try await client.cronUpdateJob(
+                        jobId: job.id,
+                        name: jobName.trimmingCharacters(in: .whitespaces),
+                        agentId: selectedAgentId,
+                        schedule: schedule,
+                        payload: payload
+                    )
+                } else {
+                    try await client.cronCreateJob(
+                        name: jobName.trimmingCharacters(in: .whitespaces),
+                        agentId: selectedAgentId,
+                        schedule: schedule,
+                        payload: payload
+                    )
+                }
+                onSaved()
                 dismiss()
             } catch {
-                createError = error.localizedDescription
+                saveError = error.localizedDescription
             }
-            isCreating = false
+            isSaving = false
         }
+    }
+
+    // MARK: - Parse existing cron expression
+
+    private static func parseSchedule(_ expr: String?) -> (type: ScheduleType, hour: Int, minute: Int, interval: Int, custom: String) {
+        guard let expr, !expr.isEmpty else {
+            return (.daily, 9, 0, 4, "")
+        }
+
+        let parts = expr.split(separator: " ").map(String.init)
+        guard parts.count == 5 else {
+            return (.custom, 9, 0, 4, expr)
+        }
+
+        let minuteStr = parts[0]
+        let hourStr = parts[1]
+        let dom = parts[2]
+        let month = parts[3]
+        let dow = parts[4]
+
+        // Check interval pattern: "0 */N * * *"
+        if minuteStr == "0" && hourStr.hasPrefix("*/") && dom == "*" && month == "*" && dow == "*" {
+            if let n = Int(hourStr.dropFirst(2)), intervalOptions.contains(n) {
+                return (.interval, 9, 0, n, "")
+            }
+        }
+
+        // Check daily pattern: "M H * * *"
+        if dom == "*" && month == "*" && dow == "*",
+           let h = Int(hourStr), let m = Int(minuteStr) {
+            // Round minute to nearest 5 for picker compatibility
+            let roundedMinute = (m / 5) * 5
+            return (.daily, h, roundedMinute, 4, "")
+        }
+
+        // Everything else is custom
+        return (.custom, 9, 0, 4, expr)
     }
 }

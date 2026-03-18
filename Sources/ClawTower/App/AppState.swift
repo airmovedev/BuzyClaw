@@ -14,6 +14,8 @@ final class AppState {
     var chatDrafts: [String: ChatDraft] = [:]
     var subagentRefreshTrigger: Int = 0
     var trackedSubagentKeys: Set<String> = []
+    let taskManager = TaskManager()
+    let usageStatisticsService: UsageStatisticsService
     var isOnboardingComplete: Bool
     var gatewayMode: GatewayMode {
         get {
@@ -45,7 +47,18 @@ final class AppState {
             manager.mode = mode
         }
         self.gatewayManager = manager
-        self.gatewayClient = GatewayClient(baseURL: URL(string: "http://localhost:0")!)
+        let client = GatewayClient(baseURL: URL(string: "http://127.0.0.1:0")!)
+        self.gatewayClient = client
+        self.usageStatisticsService = UsageStatisticsService(gatewayClient: client)
+
+        // Keep GatewayClient in sync when the gateway restarts after a crash
+        manager.onConnectionInfoChanged = { [weak client] port, token in
+            guard let client else { return }
+            let url = URL(string: "http://127.0.0.1:\(port)")!
+            client.updateBaseURL(url)
+            client.setAuthToken(token)
+            NSLog("[AppState] Gateway client re-synced after restart: baseURL=\(url)")
+        }
         let flaggedComplete = UserDefaults.standard.bool(forKey: "onboardingComplete")
         if flaggedComplete {
             // Validate that the data directory actually exists; if the user wiped
@@ -102,8 +115,14 @@ final class AppState {
     func startGateway() async {
         await gatewayManager.startGateway()
 
-        // Update client to point at the gateway's actual port and token
-        let url = URL(string: "http://localhost:\(gatewayManager.port)")!
+        // Update client to point at the gateway's actual port and token.
+        // Use 127.0.0.1 explicitly — the gateway binds to IPv4 loopback only (--bind loopback).
+        // Using "localhost" can resolve to IPv6 ::1 first, causing -1004 connection failures.
+        guard gatewayManager.port > 0 else {
+            NSLog("[AppState] Gateway port is 0 after startGateway — cannot update client")
+            return
+        }
+        let url = URL(string: "http://127.0.0.1:\(gatewayManager.port)")!
         gatewayClient.updateBaseURL(url)
         gatewayClient.setAuthToken(gatewayManager.authToken)
         NSLog("[AppState] Gateway client updated: baseURL=\(url), tokenPresent=\(gatewayManager.authToken.isEmpty ? "NO" : "YES"), mode=\(gatewayManager.mode)")
@@ -114,6 +133,9 @@ final class AppState {
             try? await Task.sleep(for: .seconds(1))
         }
 
+        // Start task manager for kanban board
+        taskManager.start()
+
         // Start CloudKit Relay once gateway is running (non-critical, failure won't affect app)
         if gatewayManager.isRunning {
             guard isCloudKitRelayAvailable else {
@@ -121,7 +143,7 @@ final class AppState {
                 return
             }
 
-            let relayURL = URL(string: "http://localhost:\(gatewayManager.port)")!
+            let relayURL = URL(string: "http://127.0.0.1:\(gatewayManager.port)")!
             let relayToken = gatewayManager.authToken
             let relay = CloudKitRelayService()
             self.cloudKitRelay = relay
@@ -187,7 +209,7 @@ final class AppState {
     func restartGateway() async {
         await gatewayManager.restartGateway()
 
-        let url = URL(string: "http://localhost:\(gatewayManager.port)")!
+        let url = URL(string: "http://127.0.0.1:\(gatewayManager.port)")!
         gatewayClient.updateBaseURL(url)
         gatewayClient.setAuthToken(gatewayManager.authToken)
     }

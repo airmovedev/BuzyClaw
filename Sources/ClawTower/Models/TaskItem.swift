@@ -41,6 +41,15 @@ struct TaskItem: Identifiable, Codable, Hashable {
             case .urgent: "紧急"
             }
         }
+
+        var icon: String {
+            switch self {
+            case .low: "arrow.down.circle"
+            case .medium: "minus.circle"
+            case .high: "arrow.up.circle"
+            case .urgent: "exclamationmark.circle.fill"
+            }
+        }
     }
 
     var id: String
@@ -49,6 +58,7 @@ struct TaskItem: Identifiable, Codable, Hashable {
     var priority: Priority
     var source: String
     var context: String
+    var parentTaskId: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -59,17 +69,29 @@ struct TaskItem: Identifiable, Codable, Hashable {
         case priority
         case source
         case context
+        case parentTaskId
         case createdAt
         case updatedAt
     }
 
-    init(id: String = UUID().uuidString, title: String, status: Status, priority: Priority, source: String, context: String, createdAt: Date, updatedAt: Date) {
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        status: Status,
+        priority: Priority,
+        source: String,
+        context: String,
+        parentTaskId: String? = nil,
+        createdAt: Date,
+        updatedAt: Date
+    ) {
         self.id = id
         self.title = title
         self.status = status
         self.priority = priority
         self.source = source
         self.context = context
+        self.parentTaskId = parentTaskId
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -82,6 +104,7 @@ struct TaskItem: Identifiable, Codable, Hashable {
         priority = try container.decode(Priority.self, forKey: .priority)
         source = try container.decodeIfPresent(String.self, forKey: .source) ?? ""
         context = try container.decodeIfPresent(String.self, forKey: .context) ?? ""
+        parentTaskId = try container.decodeIfPresent(String.self, forKey: .parentTaskId)
 
         let createdString = try container.decode(String.self, forKey: .createdAt)
         let updatedString = try container.decode(String.self, forKey: .updatedAt)
@@ -101,6 +124,7 @@ struct TaskItem: Identifiable, Codable, Hashable {
         try container.encode(priority, forKey: .priority)
         try container.encode(source, forKey: .source)
         try container.encode(context, forKey: .context)
+        try container.encodeIfPresent(parentTaskId, forKey: .parentTaskId)
         try container.encode(TaskDateCodec.string(from: createdAt), forKey: .createdAt)
         try container.encode(TaskDateCodec.string(from: updatedAt), forKey: .updatedAt)
     }
