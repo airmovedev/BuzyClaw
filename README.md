@@ -33,48 +33,77 @@ BuzyClaw is a **native macOS & iOS app** that gives [OpenClaw](https://github.co
 
 ## ✨ Features
 
-### 🤖 Multi-Agent Management
-- Create, configure, and switch between multiple AI agents
-- Each agent has its own workspace, personality, and memory
-- Visual agent cards with status indicators
+### 📋 Dashboard & Task Management
 
-### 💬 Native Chat Interface
-- Real-time streaming chat with your agents
-- Markdown rendering with syntax highlighting
-- Distinguishes between user messages, agent replies, and inter-agent forwarded messages
-- File attachments and image support
+Get a bird's-eye view of your entire agent ecosystem. The dashboard shows all agents with their status, active tasks, projects, and upcoming cron jobs — everything you need at a glance.
 
-### 📋 Dashboard
-- At-a-glance view of all agents, tasks, projects, and cron jobs
-- Agent activity feed showing recent actions
+<p align="center">
+  <img src="screenshots/Dashboard_tasks.png" width="800" alt="Dashboard with tasks overview">
+</p>
+
+### 💬 Agent Chat & Activity Feed
+
+Chat with your AI agents in real-time with streaming responses, full Markdown rendering and syntax highlighting. The activity feed shows what your agents have been up to, including inter-agent communication with visual distinction between user messages, agent replies, and forwarded messages.
+
+<p align="center">
+  <img src="screenshots/Agents_chat&activity.png" width="800" alt="Agent chat interface with activity feed">
+</p>
+
+### 🤖 Agent Configuration
+
+Create and configure multiple AI agents, each with their own model, personality, workspace, and memory. Visual agent cards show status, model info, and quick actions.
+
+<p align="center">
+  <img src="screenshots/AgentDetail.png" width="800" alt="Agent detail configuration">
+</p>
 
 ### 🧠 Second Brain
-- Browse and search your agent's knowledge base
-- Markdown document viewer with full rendering
 
-### ⏰ Cron & Automation
-- View and manage scheduled tasks (daily reports, memory cleanup, etc.)
-- See run history and next execution times
+Browse and search your agent's knowledge base — daily memory logs, curated long-term memory, and workspace documents, all rendered beautifully with full Markdown support.
+
+<p align="center">
+  <img src="screenshots/SecondBrain.png" width="800" alt="Second brain knowledge base browser">
+</p>
+
+### ⏰ Cron Jobs & Automation
+
+Manage your agent's scheduled tasks: daily reports, memory cleanup, research jobs, and more. See run history, next execution times, and job status at a glance.
+
+<p align="center">
+  <img src="screenshots/Cronjobs.png" width="800" alt="Cron jobs management">
+</p>
+
+### ⚙️ Settings
+
+Configure AI providers, model preferences, heartbeat intervals, permissions, and more. Fine-tune your agent setup with a clean native settings interface.
+
+<p align="center">
+  <img src="screenshots/Settings.png" width="800" alt="Settings panel">
+</p>
+
+### 📊 Usage Statistics
+
+Track model usage across providers (Anthropic, OpenAI, etc.). Monitor rate limits, token consumption, and cost — know exactly how your agents are spending resources.
+
+<p align="center">
+  <img src="screenshots/UsageStatistic.png" width="800" alt="Model usage statistics">
+</p>
 
 ### 📱 iOS Companion
-- View agent status and chat from your iPhone
-- CloudKit sync between macOS and iOS
-- Dashboard, second brain, and cron management on the go
+
+Take your agents on the go. The iOS companion app syncs via CloudKit, letting you view agent status, chat, browse your second brain, and manage cron jobs from your iPhone.
 
 ### 🖥️ macOS Comforts
-- Menu bar resident — always accessible
-- Sparkle auto-updates
-- Native SwiftUI look and feel
 
-## 📸 Screenshots
-
-<!-- TODO: Add screenshots -->
+- **Menu bar resident** — always one click away
+- **Sparkle auto-updates** — stay current effortlessly
+- **Native SwiftUI** — feels right at home on macOS
 
 ## 🚀 Getting Started
 
 ### Download
 
-Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/releases) page.
+Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0) page.
 
 1. Open the DMG
 2. Drag **BuzyClaw** to your Applications folder
@@ -86,8 +115,6 @@ Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/r
 - Apple Silicon or Intel Mac
 
 ### Build from Source
-
-If you prefer to build from source:
 
 ```bash
 # 1. Clone the repo
