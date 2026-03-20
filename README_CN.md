@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/airmovedev/BuzyClaw/releases">
-    <img src="https://img.shields.io/github/v/release/airmovedev/BuzyClaw?label=下载&style=flat-square" alt="Release">
+  <a href="https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0">
+    <img src="https://img.shields.io/badge/下载-v1.0.0-blue?style=flat-square" alt="下载 v1.0.0">
   </a>
   <img src="https://img.shields.io/badge/平台-macOS%2014%2B%20%7C%20iOS%2018%2B-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6-orange?style=flat-square" alt="Swift 6">
@@ -25,93 +25,85 @@
 
 ---
 
-## 「虾忙」是什么？
+## 虾忙是什么？
 
 虾忙（BuzyClaw）是一个**原生 macOS & iOS 应用**，为 [OpenClaw](https://github.com/openclaw/openclaw) 提供了一个真正的图形化界面。不用再通过终端命令管理你的 AI Agent，虾忙让你可以直接在桌面端和 Agent 聊天、管理任务、浏览第二大脑，还能常驻在菜单栏随时唤起。
 
 > **一句话理解：** OpenClaw 提供 AI Agent 运行时 —— 虾忙负责把这些能力变成原生应用体验。
 
-## 📸 界面截图
+## ✨ 功能特性
 
-### 仪表盘 & 任务管理
+### 📋 仪表盘 & 任务管理
+
+全局掌控你的 Agent 生态。仪表盘展示所有 Agent 的状态、活跃任务、项目进展和即将执行的定时任务 —— 一屏尽览。
+
 <p align="center">
   <img src="screenshots/Dashboard_tasks.png" width="800" alt="仪表盘与任务概览">
 </p>
 
-### Agent 对话 & 活动动态
+### 💬 Agent 对话 & 活动动态
+
+实时流式对话，完整的 Markdown 渲染和代码高亮。活动动态展示 Agent 最近在做什么，包括 Agent 之间的通信，通过不同的气泡样式区分用户消息、Agent 回复和转发消息。
+
 <p align="center">
   <img src="screenshots/Agents_chat&activity.png" width="800" alt="Agent 聊天界面与活动动态">
 </p>
 
-### Agent 详情
+### 🤖 Agent 配置
+
+创建和配置多个 AI Agent，每个 Agent 都有独立的模型、性格、工作区和记忆。可视化 Agent 卡片展示状态、模型信息和快捷操作。
+
 <p align="center">
   <img src="screenshots/AgentDetail.png" width="800" alt="Agent 详情配置">
 </p>
 
-### 第二大脑
+### 🧠 第二大脑
+
+浏览和搜索 Agent 的知识库 —— 每日记忆日志、精心整理的长期记忆、工作区文档，全部以优美的 Markdown 格式呈现。
+
 <p align="center">
   <img src="screenshots/SecondBrain.png" width="800" alt="第二大脑知识库浏览">
 </p>
 
-### 定时任务
+### ⏰ 定时任务 & 自动化
+
+管理 Agent 的计划任务：日报生成、记忆整理、研究任务等。一目了然查看执行历史、下次执行时间和任务状态。
+
 <p align="center">
   <img src="screenshots/Cronjobs.png" width="800" alt="定时任务管理">
 </p>
 
-### 设置
+### ⚙️ 设置
+
+配置 AI 模型提供商、模型偏好、心跳间隔、权限管理等。通过简洁的原生设置界面精细调整你的 Agent。
+
 <p align="center">
   <img src="screenshots/Settings.png" width="800" alt="设置面板">
 </p>
 
-### 用量统计
+### 📊 用量统计
+
+追踪各模型提供商（Anthropic、OpenAI 等）的用量。监控速率限制、Token 消耗和成本 —— 清楚了解你的 Agent 资源使用情况。
+
 <p align="center">
   <img src="screenshots/UsageStatistic.png" width="800" alt="模型用量统计">
 </p>
 
-## ✨ 功能特性
-
-### 🤖 多 Agent 管理
-- 创建、配置和切换多个 AI Agent
-- 每个 Agent 拥有独立的工作区、性格和记忆
-- 可视化 Agent 列表，带状态指示
-
-### 💬 原生对话界面
-- 实时流式对话
-- Markdown 渲染 + 代码高亮
-- 区分用户消息、Agent 回复和 Agent 间转发消息
-- 支持文件附件和图片
-
-### 📋 仪表盘
-- 一目了然查看所有 Agent、任务、项目和定时任务
-- Agent 活动动态，了解最近在做什么
-
-### 🧠 第二大脑
-- 浏览和搜索 Agent 的知识库
-- Markdown 文档查看器，完整渲染
-
-### ⏰ 定时任务 & 自动化
-- 查看和管理定时任务（日报、记忆整理等）
-- 查看执行历史和下次执行时间
-
-### 📊 用量统计
-- 追踪各模型提供商的用量（Anthropic、OpenAI 等）
-- 监控速率限制和 Token 消耗
-
 ### 📱 iOS 配套客户端
-- 在 iPhone 上查看 Agent 状态和聊天
-- 通过 iCloud 在 macOS 和 iOS 之间建立通讯，隐私数据安全保障
-- 移动端支持仪表盘、第二大脑和定时任务管理
+
+随时随地管理你的 Agent。iOS 配套应用通过 CloudKit 同步，在 iPhone 上查看 Agent 状态、聊天、浏览第二大脑和管理定时任务。
 
 ### 🖥️ macOS 特性
-- 常驻菜单栏，随时唤起
-- Sparkle 自动更新
-- 原生 SwiftUI 界面
+
+- **常驻菜单栏** — 随时一键唤起
+- **Sparkle 自动更新** — 轻松保持最新
+- **原生 SwiftUI** — macOS 原汁原味的体验
 
 ## 🚀 快速开始
 
 ### 下载安装
 
-从 [Releases](https://github.com/airmovedev/BuzyClaw/releases) 页面下载最新的 DMG 文件。
+从 [Releases](https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0) 页面下载最新的 DMG 文件。
 
 1. 打开 DMG
 2. 将 **BuzyClaw** 拖入应用程序文件夹
