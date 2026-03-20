@@ -17,6 +17,9 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/许可-MIT-green?style=flat-square" alt="License">
   </a>
+  <a href="https://buymeacoffee.com/airgo">
+    <img src="https://img.shields.io/badge/☕-请我喝咖啡-yellow?style=flat-square" alt="Buy Me a Coffee">
+  </a>
 </p>
 
 <p align="center">
@@ -202,6 +205,16 @@ Resources/
 本项目基于 MIT 许可证开源 —— 详见 [LICENSE](LICENSE) 文件。
 
 内嵌的 OpenClaw 运行时同样采用 [MIT 许可证](https://github.com/openclaw/openclaw/blob/main/LICENSE)。
+
+## ☕ 支持项目
+
+如果你觉得虾忙好用，可以请我喝杯咖啡，支持持续开发！
+
+<p align="center">
+  <a href="https://buymeacoffee.com/airgo">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-☕-yellow?style=for-the-badge&logo=buymeacoffee&logoColor=white" alt="Buy Me a Coffee">
+  </a>
+</p>
 
 ## 🙏 致谢
 

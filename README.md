@@ -17,6 +17,9 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License">
   </a>
+  <a href="https://buymeacoffee.com/airgo">
+    <img src="https://img.shields.io/badge/☕-Buy%20Me%20a%20Coffee-yellow?style=flat-square" alt="Buy Me a Coffee">
+  </a>
 </p>
 
 <p align="center">
@@ -202,6 +205,16 @@ Contributions are welcome! Whether it's bug fixes, new features, or documentatio
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 The embedded OpenClaw runtime is also [MIT licensed](https://github.com/openclaw/openclaw/blob/main/LICENSE).
+
+## ☕ Support
+
+If you find BuzyClaw useful, consider buying me a coffee to support ongoing development!
+
+<p align="center">
+  <a href="https://buymeacoffee.com/airgo">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-☕-yellow?style=for-the-badge&logo=buymeacoffee&logoColor=white" alt="Buy Me a Coffee">
+  </a>
+</p>
 
 ## 🙏 Acknowledgments
 
