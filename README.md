@@ -19,6 +19,10 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="README.md">English</a> · <a href="README_CN.md">中文</a>
+</p>
+
 ---
 
 ## What is BuzyClaw?
@@ -26,6 +30,43 @@
 BuzyClaw is a **native macOS & iOS app** that gives [OpenClaw](https://github.com/openclaw/openclaw) a proper GUI. Instead of managing your AI agents through terminal commands, BuzyClaw provides a visual interface to chat with agents, manage tasks, browse your second brain, and monitor everything from your menu bar.
 
 > **Think of it as:** OpenClaw provides the AI agent runtime — BuzyClaw provides the native app experience on top of it.
+
+## 📸 Screenshots
+
+### Dashboard & Tasks
+<p align="center">
+  <img src="screenshots/Dashboard_tasks.png" width="800" alt="Dashboard with tasks overview">
+</p>
+
+### Agent Chat & Activity Feed
+<p align="center">
+  <img src="screenshots/Agents_chat&activity.png" width="800" alt="Agent chat interface with activity feed">
+</p>
+
+### Agent Detail
+<p align="center">
+  <img src="screenshots/AgentDetail.png" width="800" alt="Agent detail configuration">
+</p>
+
+### Second Brain
+<p align="center">
+  <img src="screenshots/SecondBrain.png" width="800" alt="Second brain knowledge base browser">
+</p>
+
+### Cron Jobs
+<p align="center">
+  <img src="screenshots/Cronjobs.png" width="800" alt="Cron jobs management">
+</p>
+
+### Settings
+<p align="center">
+  <img src="screenshots/Settings.png" width="800" alt="Settings panel">
+</p>
+
+### Usage Statistics
+<p align="center">
+  <img src="screenshots/UsageStatistic.png" width="800" alt="Model usage statistics">
+</p>
 
 ## ✨ Features
 
@@ -52,6 +93,10 @@ BuzyClaw is a **native macOS & iOS app** that gives [OpenClaw](https://github.co
 - View and manage scheduled tasks (daily reports, memory cleanup, etc.)
 - See run history and next execution times
 
+### 📊 Usage Statistics
+- Track model usage across providers (Anthropic, OpenAI, etc.)
+- Monitor rate limits and token consumption
+
 ### 📱 iOS Companion
 - View agent status and chat from your iPhone
 - CloudKit sync between macOS and iOS
@@ -61,10 +106,6 @@ BuzyClaw is a **native macOS & iOS app** that gives [OpenClaw](https://github.co
 - Menu bar resident — always accessible
 - Sparkle auto-updates
 - Native SwiftUI look and feel
-
-## 📸 Screenshots
-
-<!-- TODO: Add screenshots -->
 
 ## 🚀 Getting Started
 
@@ -82,8 +123,6 @@ Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/r
 - Apple Silicon or Intel Mac
 
 ### Build from Source
-
-If you prefer to build from source:
 
 ```bash
 # 1. Clone the repo
