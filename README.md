@@ -1,117 +1,182 @@
-# BuzyClaw / 虾忙
+<p align="center">
+  <img src="SupportFiles/AppIcon.png" width="128" height="128" alt="BuzyClaw icon">
+</p>
 
-BuzyClaw（中文名：虾忙）是一个基于 OpenClaw 构建的本地 AI Agent 客户端，用原生 macOS / iOS 界面把「住在你自己设备上的 AI 助手」做得更容易上手。
+<h1 align="center">BuzyClaw / 虾忙</h1>
 
-> 当前仓库仍保留部分内部工程命名（如 `ClawTower` 的工程名、目录名、Bundle 标识等），本次优先统一开源展示层文案与 README。
+<p align="center">
+  <strong>Native macOS & iOS client for <a href="https://github.com/openclaw/openclaw">OpenClaw</a> AI Agents</strong>
+</p>
 
-## What it does
+<p align="center">
+  <a href="https://github.com/airmovedev/BuzyClaw/releases">
+    <img src="https://img.shields.io/github/v/release/airmovedev/BuzyClaw?label=Download&style=flat-square" alt="Release">
+  </a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20iOS%2018%2B-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/swift-6-orange?style=flat-square" alt="Swift 6">
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License">
+  </a>
+</p>
 
-BuzyClaw 不是又一个纯聊天壳子。它的目标是把 OpenClaw 的本地 Agent 能力，用更适合普通用户的产品形态交付出来。
+---
 
-基于当前仓库中的真实实现，项目已经包含这些方向的能力：
+## What is BuzyClaw?
 
-- **macOS 原生客户端**：SwiftUI 桌面应用，负责启动和管理本地 OpenClaw runtime
-- **多 Agent 对话入口**：支持加载 Agent、查看会话，并在桌面端进入聊天界面
-- **第二大脑浏览**：可浏览本地 `second-brain` 文档内容
-- **任务 / 项目 / 定时任务 / Skills 管理界面**：仓库中已包含对应数据模型、服务层和界面结构
-- **Menu Bar 常驻形态**：关闭主窗口后可隐藏到后台，通过菜单栏重新唤起
-- **iOS 配套客户端**：仓库内包含 iOS target，用于远程查看 Agent、聊天、看板、第二大脑与定时任务
-- **CloudKit 通信基础**：用于 macOS 与 iOS 间的数据同步 / 消息中转
+BuzyClaw is a **native macOS & iOS app** that gives [OpenClaw](https://github.com/openclaw/openclaw) a proper GUI. Instead of managing your AI agents through terminal commands, BuzyClaw provides a visual interface to chat with agents, manage tasks, browse your second brain, and monitor everything from your menu bar.
 
-## Why OpenClaw
+> **Think of it as:** OpenClaw provides the AI agent runtime — BuzyClaw provides the native app experience on top of it.
 
-BuzyClaw 基于 OpenClaw 构建。
+## ✨ Features
 
-- **OpenClaw** 提供底层 Agent runtime、Gateway、skills/tooling 能力
-- **BuzyClaw / 虾忙** 负责把这些能力封装成更适合终端用户的原生应用体验
+### 🤖 Multi-Agent Management
+- Create, configure, and switch between multiple AI agents
+- Each agent has its own workspace, personality, and memory
+- Visual agent cards with status indicators
 
-如果你熟悉 OpenClaw，可以把 BuzyClaw 理解为：**面向日常用户的 GUI 产品层**。
+### 💬 Native Chat Interface
+- Real-time streaming chat with your agents
+- Markdown rendering with syntax highlighting
+- Distinguishes between user messages, agent replies, and inter-agent forwarded messages
+- File attachments and image support
 
-## Tech stack
+### 📋 Dashboard
+- At-a-glance view of all agents, tasks, projects, and cron jobs
+- Agent activity feed showing recent actions
 
-当前仓库可见的主要技术栈：
+### 🧠 Second Brain
+- Browse and search your agent's knowledge base
+- Markdown document viewer with full rendering
 
-- **Swift 6 + SwiftUI**
-- **macOS 14+ / iOS 18+ targets**（以 `project.yml` 当前配置为准）
-- **XcodeGen**：项目生成
-- **CloudKit**：macOS / iOS 通信
-- **MarkdownUI**：Markdown 渲染
-- **Sparkle**：macOS 更新能力接入
-- **Embedded OpenClaw runtime**：随 app 资源一同打包
+### ⏰ Cron & Automation
+- View and manage scheduled tasks (daily reports, memory cleanup, etc.)
+- See run history and next execution times
 
-## Repository structure
+### 📱 iOS Companion
+- View agent status and chat from your iPhone
+- CloudKit sync between macOS and iOS
+- Dashboard, second brain, and cron management on the go
 
-```text
-.
-├── README.md
-├── PRODUCT.md
-├── PRD.md
-├── ARCHITECTURE.md
-├── ONBOARDING.md
-├── project.yml
-├── Sources/
-│   ├── ClawTower/         # macOS app source
-│   └── ClawTowerMobile/   # iOS app source
-├── SupportFiles/
-└── Resources/runtime/openclaw/
-```
+### 🖥️ macOS Comforts
+- Menu bar resident — always accessible
+- Sparkle auto-updates
+- Native SwiftUI look and feel
 
-## Install / run
+## 📸 Screenshots
 
-### macOS
+<!-- TODO: Add screenshots -->
 
-当前仓库里主要提供的是**源码工程**，适合本地构建运行：
+## 🚀 Getting Started
 
-1. 准备 Xcode（建议使用可支持 Swift 6 的版本）
-2. 安装 `xcodegen`
-3. 在仓库根目录执行：
+### Download
+
+Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/releases) page.
+
+1. Open the DMG
+2. Drag **BuzyClaw** to your Applications folder
+3. Launch BuzyClaw — it will set up the embedded OpenClaw runtime automatically
+
+### Prerequisites
+
+- macOS 14.0 (Sonoma) or later
+- Apple Silicon or Intel Mac
+
+### Build from Source
+
+If you prefer to build from source:
 
 ```bash
+# 1. Clone the repo
+git clone https://github.com/airmovedev/BuzyClaw.git
+cd BuzyClaw
+
+# 2. Install xcodegen (if you don't have it)
+brew install xcodegen
+
+# 3. Generate Xcode project
 xcodegen generate
+
+# 4. Open and run
 open ClawTower.xcodeproj
+# Select the BuzyClaw_mac scheme → Run
 ```
 
-然后在 Xcode 中选择 `ClawTower` scheme 运行。
+#### iOS Target
 
-### iOS
+The repo also includes an iOS target (`ClawTowerMobile`). It requires:
+- A paired macOS instance running BuzyClaw
+- CloudKit configuration (iCloud developer account)
 
-仓库中同时包含 iOS target：
+## 🏗️ Architecture
 
-- scheme：`ClawTowerMobile`
-- 依赖 macOS 端 / CloudKit 配置配合使用
-- 更适合作为开发态体验与联调入口，而不是当前仓库阶段下的开箱即用发行包说明
+```
+Sources/
+├── ClawTower/              # macOS app
+│   ├── App/                # App entry, ContentView, menu bar
+│   ├── Models/             # ChatMessage, Agent, Task, Project, etc.
+│   ├── Services/
+│   │   ├── Gateway/        # OpenClaw runtime management & API
+│   │   └── CloudKit/       # macOS ↔ iOS sync
+│   └── Views/
+│       ├── Agent/          # Agent list, detail, creation
+│       ├── Chat/           # Chat interface, message bubbles
+│       ├── Dashboard/      # Main dashboard
+│       ├── SecondBrain/    # Knowledge base browser
+│       └── Settings/       # App settings, permissions
+│
+├── ClawTowerMobile/        # iOS companion app
+│   ├── Models/             # Dashboard snapshots, sync models
+│   ├── Services/           # CloudKit messaging client
+│   └── Views/              # Mobile-optimized UI
+│
+Resources/
+└── runtime/openclaw/       # Embedded OpenClaw runtime (MIT)
+```
 
-## Open source notes
+## 🔧 Tech Stack
 
-当前仓库里可以确认的开源依赖信息：
+| Layer | Technology |
+|-------|-----------|
+| UI | SwiftUI (Swift 6) |
+| Platforms | macOS 14+, iOS 18+ |
+| Project Gen | [XcodeGen](https://github.com/yonaskolb/XcodeGen) |
+| AI Runtime | [OpenClaw](https://github.com/openclaw/openclaw) (embedded) |
+| Sync | CloudKit (macOS ↔ iOS) |
+| Markdown | [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) |
+| Auto-Update | [Sparkle](https://github.com/sparkle-project/Sparkle) |
+| Signing | Developer ID + Apple Notarization |
 
-- 内嵌的 `Resources/runtime/openclaw` 来自 **OpenClaw**
-- 该目录下已包含上游 `LICENSE`
-- `Resources/runtime/openclaw/package.json` 显示其 license 为 **MIT**
+## 🤝 Contributing
 
-需要注意：
+Contributions are welcome! Whether it's bug fixes, new features, or documentation improvements.
 
-- **仓库根目录目前没有看到项目自己的 LICENSE 文件**
-- 因此在正式公开到 GitHub 前，建议先明确 BuzyClaw 仓库本身采用什么许可证
-- 在许可证未最终确定前，README 不对 BuzyClaw 自身许可证做杜撰声明
+1. Fork the repo
+2. Create your feature branch (`git checkout -b feature/awesome`)
+3. Commit your changes (`git commit -m 'Add awesome feature'`)
+4. Push to the branch (`git push origin feature/awesome`)
+5. Open a Pull Request
 
-## Thanks
+### Development Notes
 
-- [OpenClaw](https://github.com/openclaw/openclaw) — 提供底层 runtime 与生态基础
-- [Sparkle](https://github.com/sparkle-project/Sparkle) — macOS 更新框架
-- [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) — Markdown 渲染
+- The Xcode project name is still `ClawTower` internally — this is intentional to avoid breaking build configurations
+- Run `xcodegen generate` after modifying `project.yml`
+- The embedded OpenClaw runtime is bundled under `Resources/runtime/openclaw/`
 
-## Current naming status
+## 📄 License
 
-本次整理已优先统一**开源展示层**名称为：
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
-- English: **BuzyClaw**
-- 中文：**虾忙**
+The embedded OpenClaw runtime is also [MIT licensed](https://github.com/openclaw/openclaw/blob/main/LICENSE).
 
-但以下内容仍可能暂时保留 `ClawTower`：
+## 🙏 Acknowledgments
 
-- Xcode 工程名 / target 名
-- 部分源码内窗口标题、菜单标题
-- Bundle identifier / iCloud container / 本地数据目录等内部实现命名
+- [OpenClaw](https://github.com/openclaw/openclaw) — The AI agent runtime that powers everything
+- [Sparkle](https://github.com/sparkle-project/Sparkle) — macOS update framework
+- [swift-markdown-ui](https://github.com/gonzalezreal/swift-markdown-ui) — Beautiful Markdown rendering
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) — Xcode project generation
 
-这些属于工程层重命名工作，和本次 README / 展示文案整理不是一回事。先别乱动，免得把工程搞炸。
+---
+
+<p align="center">
+  <sub>Built with ❤️ by <a href="https://github.com/airmovedev">airmovedev</a></sub>
+</p>
