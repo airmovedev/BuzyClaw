@@ -9,14 +9,18 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/airmovedev/BuzyClaw/releases">
-    <img src="https://img.shields.io/github/v/release/airmovedev/BuzyClaw?label=Download&style=flat-square" alt="Release">
+  <a href="https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0">
+    <img src="https://img.shields.io/badge/Download-v1.0.0-blue?style=flat-square" alt="Download v1.0.0">
   </a>
   <img src="https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20iOS%2018%2B-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6-orange?style=flat-square" alt="Swift 6">
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License">
   </a>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · <a href="README_CN.md">中文</a>
 </p>
 
 ---
