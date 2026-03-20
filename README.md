@@ -93,6 +93,10 @@ Track model usage across providers (Anthropic, OpenAI, etc.). Monitor rate limit
 
 Take your agents on the go. The iOS companion app syncs via CloudKit, letting you view agent status, chat, browse your second brain, and manage cron jobs from your iPhone.
 
+<p align="center">
+  <img src="screenshots/iOSCompanion.png" width="800" alt="iOS companion app">
+</p>
+
 ### 🖥️ macOS Comforts
 
 - **Menu bar resident** — always one click away

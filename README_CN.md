@@ -93,6 +93,10 @@
 
 随时随地管理你的 Agent。iOS 配套应用通过 CloudKit 同步，在 iPhone 上查看 Agent 状态、聊天、浏览第二大脑和管理定时任务。
 
+<p align="center">
+  <img src="screenshots/iOSCompanion.png" width="800" alt="iOS 配套应用">
+</p>
+
 ### 🖥️ macOS 特性
 
 - **常驻菜单栏** — 随时一键唤起
