@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0">
-    <img src="https://img.shields.io/badge/Download-v1.0.0-blue?style=flat-square" alt="Download v1.0.0">
+  <a href="https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.1">
+    <img src="https://img.shields.io/badge/Download-v1.0.1-blue?style=flat-square" alt="Download v1.0.0">
   </a>
   <img src="https://img.shields.io/badge/platform-macOS%2014%2B%20%7C%20iOS%2018%2B-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6-orange?style=flat-square" alt="Swift 6">
@@ -103,7 +103,7 @@ Take your agents on the go. The iOS companion app syncs via CloudKit, letting yo
 
 ### Download
 
-Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.0) page.
+Grab the latest DMG from the [Releases](https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.1) page.
 
 1. Open the DMG
 2. Drag **BuzyClaw** to your Applications folder
