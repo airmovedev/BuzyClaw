@@ -25,7 +25,7 @@
 
 ---
 
-## 虾忙是什么？
+## 「虾忙」是什么？
 
 虾忙（BuzyClaw）是一个**原生 macOS & iOS 应用**，为 [OpenClaw](https://github.com/openclaw/openclaw) 提供了一个真正的图形化界面。不用再通过终端命令管理你的 AI Agent，虾忙让你可以直接在桌面端和 Agent 聊天、管理任务、浏览第二大脑，还能常驻在菜单栏随时唤起。
 
@@ -73,7 +73,7 @@
 ### 🤖 多 Agent 管理
 - 创建、配置和切换多个 AI Agent
 - 每个 Agent 拥有独立的工作区、性格和记忆
-- 可视化 Agent 卡片，带状态指示
+- 可视化 Agent 列表，带状态指示
 
 ### 💬 原生对话界面
 - 实时流式对话
@@ -99,7 +99,7 @@
 
 ### 📱 iOS 配套客户端
 - 在 iPhone 上查看 Agent 状态和聊天
-- 通过 CloudKit 在 macOS 和 iOS 之间同步
+- 通过 iCloud 在 macOS 和 iOS 之间建立通讯，隐私数据安全保障
 - 移动端支持仪表盘、第二大脑和定时任务管理
 
 ### 🖥️ macOS 特性
