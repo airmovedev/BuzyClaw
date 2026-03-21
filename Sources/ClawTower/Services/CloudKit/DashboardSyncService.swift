@@ -14,6 +14,7 @@ final class DashboardSyncService {
     private let logger = Logger(subsystem: "com.clawtower.mac", category: "DashboardSyncService")
 
     private var timer: Timer?
+    private var activity: NSObjectProtocol?
     private let syncInterval: TimeInterval = 30
     private let database = CKContainer(identifier: CloudKitConstants.containerID).privateCloudDatabase
     private var zoneEnsured = false
@@ -23,6 +24,13 @@ final class DashboardSyncService {
     func start(appState: AppState) {
         self.appState = appState
         stop()
+
+        // Prevent App Nap from freezing the timer when the app is in background
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Dashboard sync for iOS companion app"
+        )
+
         // Sync immediately, then every 30s
         Task {
             await self.ensureZoneExists()
@@ -37,6 +45,10 @@ final class DashboardSyncService {
     }
 
     func stop() {
+        if let activity {
+            ProcessInfo.processInfo.endActivity(activity)
+            self.activity = nil
+        }
         timer?.invalidate()
         timer = nil
     }
