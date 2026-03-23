@@ -38,6 +38,8 @@ struct MessageParser {
             if trimmed.hasPrefix("[Internal task completion event]") { return true }
             if trimmed.contains("OpenClaw runtime context (internal)") { return true }
             if trimmed.contains("subagent task is ready for user delivery") { return true }
+            // sessions_send results injected from other agents
+            if trimmed.hasPrefix("[sessions_send") || trimmed.hasPrefix("[Tool: sessions_send") { return true }
         }
         
         // 3. 新版结构化事件检测（兼容 3.1+）
@@ -281,6 +283,8 @@ struct MessageParser {
         case "canvas": return "画布操作"
         case "process": return "进程管理"
         case "sessions_spawn": return "分派任务"
+        case "sessions_send": return "发送会话消息"
+        case "sessions_list": return "列出会话"
         case "cron": return "定时任务"
         case "memory_search": return "搜索记忆"
         case "memory_get": return "读取记忆"
@@ -305,6 +309,8 @@ struct MessageParser {
         case "nodes": return "server.rack"
         case "canvas": return "paintbrush"
         case "sessions_spawn": return "arrow.triangle.branch"
+        case "sessions_send": return "paperplane"
+        case "sessions_list": return "list.bullet"
         case "cron": return "clock"
         case "memory_search", "memory_get": return "brain"
         case "session_status": return "chart.bar"

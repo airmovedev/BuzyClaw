@@ -143,34 +143,6 @@ struct AgentDetailView: View {
                 .help("删除 Agent")
             }
 
-            if !isEditing {
-                Button {
-                    startEditing()
-                } label: {
-                    Label("编辑", systemImage: "pencil")
-                        .font(.callout)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(themeColor)
-                .disabled(currentTabContent == nil)
-                .help("编辑当前文档")
-            } else {
-                Button("取消") {
-                    cancelEditing()
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    saveDocument()
-                } label: {
-                    Label("保存", systemImage: "square.and.arrow.down")
-                        .font(.callout)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(themeColor)
-                .disabled(isSaving)
-            }
-
             Button { dismiss() } label: {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundStyle(.secondary)
@@ -250,6 +222,34 @@ struct AgentDetailView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
+
+            if !isEditing {
+                Button {
+                    startEditing()
+                } label: {
+                    Label("编辑", systemImage: "pencil")
+                        .font(.callout)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(themeColor)
+                .disabled(currentTabContent == nil)
+                .help("编辑当前文档")
+            } else {
+                Button("取消") {
+                    cancelEditing()
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    saveDocument()
+                } label: {
+                    Label("保存", systemImage: "square.and.arrow.down")
+                        .font(.callout)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(themeColor)
+                .disabled(isSaving)
+            }
         }
     }
 

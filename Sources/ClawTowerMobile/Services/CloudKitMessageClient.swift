@@ -245,6 +245,8 @@ final class CloudKitMessageClient {
             let metadataData = try JSONSerialization.data(withJSONObject: [
                 "agentId": selectedAgentId,
                 "clientMessageId": messageID,
+                "sourcePlatform": "ios",
+                "clientId": "buzyclaw-ios",
             ])
             metadata = String(data: metadataData, encoding: .utf8) ?? "{}"
         } catch {
@@ -308,8 +310,10 @@ final class CloudKitMessageClient {
             var metaDict: [String: Any] = [
                 "agentId": selectedAgentId,
                 "clientMessageId": messageID,
+                "sourcePlatform": "ios",
+                "clientId": "buzyclaw-ios",
             ]
-            metaDict["attachments"] = [["type": "image", "hasAsset": true]]
+            metaDict["attachments"] = [["type": "image", "hasAsset": true, "transport": "ckasset"]]
             let metadataData = try JSONSerialization.data(withJSONObject: metaDict)
             metadata = String(data: metadataData, encoding: .utf8) ?? "{}"
         } catch {
@@ -398,7 +402,7 @@ final class CloudKitMessageClient {
             let existingIDs = Set(messages.map(\.id))
             var didChange = false
             for msg in newMessages {
-                Self.cacheImageIfNeeded(for: msg)
+                let imageCached = cacheIncomingImageIfNeeded(for: msg)
                 if msg.direction == .fromGateway && !existingIDs.contains(msg.id) {
                     let responseAgentId = msg.sessionKey.split(separator: ":").dropFirst().first.map(String.init) ?? "main"
                     if responseAgentId != selectedAgentId || isInBackground {
@@ -422,6 +426,7 @@ final class CloudKitMessageClient {
                         messages.append(msg)
                         didChange = true
                         isWaitingForReply = false
+                        ackFromGatewayMessageIfNeeded(msg, imageCached: imageCached)
                     }
                 }
                 // Also update status of sent messages in current session
@@ -606,12 +611,12 @@ final class CloudKitMessageClient {
             let existingIDs = Set(messages.map(\.id))
             var didChange = false
             for msg in allMessages {
-                // Cache image data for any message that has a CKAsset
-                Self.cacheImageIfNeeded(for: msg)
+                let imageCached = cacheIncomingImageIfNeeded(for: msg)
 
                 if !existingIDs.contains(msg.id) && msg.sessionKey == sessionKey {
                     messages.append(msg)
                     didChange = true
+                    ackFromGatewayMessageIfNeeded(msg, imageCached: imageCached)
                 }
             }
             // Also update statuses for current session messages without regressing local ACK state
@@ -732,7 +737,7 @@ final class CloudKitMessageClient {
                 guard record.recordType == MessageRecord.recordType else { continue }
                 guard let msg = MessageRecord.from(record: record) else { continue }
 
-                Self.cacheImageIfNeeded(for: msg)
+                let imageCached = cacheIncomingImageIfNeeded(for: msg)
 
                 if msg.direction == .fromGateway {
                     let existingIDs = Set(messages.map(\.id))
@@ -749,6 +754,7 @@ final class CloudKitMessageClient {
                             didChange = true
                             isWaitingForReply = false
                             clearOptimisticWaitingState(before: msg.timestamp, sessionKey: sessionKey)
+                            ackFromGatewayMessageIfNeeded(msg, imageCached: imageCached)
                         }
                     }
                 }
@@ -898,6 +904,36 @@ final class CloudKitMessageClient {
             try data.write(to: cacheFileURL(), options: .atomic)
         } catch {
             logger.error("Failed to save local cache: \(error.localizedDescription)")
+        }
+    }
+
+    private func cacheIncomingImageIfNeeded(for message: MessageRecord) -> Bool {
+        Self.cacheImageIfNeeded(for: message)
+        guard message.imageAsset != nil else { return true }
+        return Self.cachedImageData(for: message.id) != nil
+    }
+
+    private func ackFromGatewayMessageIfNeeded(_ message: MessageRecord, imageCached: Bool) {
+        guard message.direction == .fromGateway, message.sessionKey == currentSessionKey else { return }
+        guard imageCached else {
+            NSLog("[CloudKitMessage] ⏭️ Skip ACK for %@ because image cache is not ready", message.id)
+            return
+        }
+        Task {
+            await ackFromGatewayMessage(message)
+        }
+    }
+
+    private func ackFromGatewayMessage(_ message: MessageRecord) async {
+        do {
+            let record = try await database.record(for: message.recordID)
+            let currentStatus = record["status"] as? String
+            guard currentStatus == MessageStatus.pending.rawValue else { return }
+            record["status"] = MessageStatus.delivered.rawValue as CKRecordValue
+            try await database.save(record)
+            NSLog("[CloudKitMessage] ✅ ACK fromGateway message: %@", message.id)
+        } catch {
+            NSLog("[CloudKitMessage] ⚠️ ACK fromGateway failed (non-critical): %@", error.localizedDescription)
         }
     }
 

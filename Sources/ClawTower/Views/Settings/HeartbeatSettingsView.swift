@@ -99,8 +99,6 @@ struct HeartbeatSettingsView: View {
         var heartbeatEveryFromConfig: String?
 
         if let agentsObj = json["agents"] as? [String: Any] {
-            buildModelOptions(from: agentsObj["defaults"] as? [String: Any])
-
             // Priority: agent-specific config (agents.list[main]) overrides global default
             var effectiveHeartbeat: [String: Any]?
 
@@ -137,6 +135,9 @@ struct HeartbeatSettingsView: View {
             if defaultModel.isEmpty, let fallback = heartbeatModelFromConfig {
                 defaultModel = fallback
             }
+
+            // Build model options AFTER defaultModel is set, so it can be included in the list
+            buildModelOptions(from: agentsObj["defaults"] as? [String: Any])
             applyDefaultModelIfNeeded()
             return
         }
@@ -147,23 +148,84 @@ struct HeartbeatSettingsView: View {
     }
 
     private func buildModelOptions(from defaults: [String: Any]?) {
-        var options: [ModelOption] = []
-
+        // Build alias lookup from defaults.models
+        var aliasMap: [String: String] = [:]
         if let models = defaults?["models"] as? [String: Any] {
             for (modelId, value) in models {
-                let alias = (value as? [String: Any])?["alias"] as? String
-                let label = buildLabel(alias: alias, modelId: modelId)
-                options.append(ModelOption(id: modelId, label: label))
+                if let alias = (value as? [String: Any])?["alias"] as? String,
+                   !alias.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    aliasMap[modelId] = alias
+                }
             }
         }
 
-        options.sort { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
-        modelOptions = options
+        // Build complete model list from config (same logic as AgentDraft.modelOptions)
+        var allModelIds: [String] = []
 
+        // 1. primary + fallbacks
+        if let modelConfig = defaults?["model"] as? [String: Any] {
+            if let primary = modelConfig["primary"] as? String {
+                allModelIds.append(primary)
+            }
+            if let fallbacks = modelConfig["fallbacks"] as? [String] {
+                for fb in fallbacks where !allModelIds.contains(fb) {
+                    allModelIds.append(fb)
+                }
+            }
+        }
+
+        // 2. defaults.models keys
+        if let models = defaults?["models"] as? [String: Any] {
+            for key in models.keys where !allModelIds.contains(key) {
+                allModelIds.append(key)
+            }
+        }
+
+        // 3. models.providers
+        if let json = readConfig(),
+           let modelsObj = json["models"] as? [String: Any],
+           let providers = modelsObj["providers"] as? [String: Any] {
+            for (providerId, providerValue) in providers {
+                if let providerDict = providerValue as? [String: Any],
+                   let modelsList = providerDict["models"] as? [[String: Any]] {
+                    for entry in modelsList {
+                        if let modelId = entry["id"] as? String {
+                            let fullId = "\(providerId)/\(modelId)"
+                            if !allModelIds.contains(fullId) {
+                                allModelIds.append(fullId)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Also scan agents.list for any model not yet included (e.g. heartbeat models)
+        if let json = readConfig(),
+           let agentsObj = json["agents"] as? [String: Any],
+           let list = agentsObj["list"] as? [[String: Any]] {
+            for agent in list {
+                if let m = agent["model"] as? String, !allModelIds.contains(m) {
+                    allModelIds.append(m)
+                }
+                if let hb = agent["heartbeat"] as? [String: Any],
+                   let hbModel = hb["model"] as? String, !allModelIds.contains(hbModel) {
+                    allModelIds.append(hbModel)
+                }
+            }
+        }
+
+        var options = allModelIds.map { modelId in
+            ModelOption(id: modelId, label: buildLabel(alias: aliasMap[modelId], modelId: modelId))
+        }
+
+        // If the currently selected model still isn't in the list, add it
         if !defaultModel.isEmpty,
            !options.contains(where: { $0.id == defaultModel }) {
-            modelOptions.insert(ModelOption(id: defaultModel, label: buildLabel(alias: nil, modelId: defaultModel)), at: 0)
+            options.insert(ModelOption(id: defaultModel, label: buildLabel(alias: nil, modelId: defaultModel)), at: 0)
         }
+
+        modelOptions = options
     }
 
     private func buildLabel(alias: String?, modelId: String) -> String {

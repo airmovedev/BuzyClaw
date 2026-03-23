@@ -663,7 +663,19 @@ final class CloudKitRelayService {
         let metadataData = try JSONSerialization.data(withJSONObject: metadataDict)
         let metadata = String(data: metadataData, encoding: .utf8) ?? "{}"
 
-        let sessionKey = "agent:\(job.agentId):main"
+        // Use the cron run's session key if available so messages appear
+        // in the correct cron sub-session on iOS instead of the main session.
+        let sessionKey: String
+        if let runSessionId = run.sessionId, !runSessionId.isEmpty {
+            // sessionId from the Gateway is already a full session key (e.g. "agent:main:cron-xxx")
+            if runSessionId.contains(":") {
+                sessionKey = runSessionId
+            } else {
+                sessionKey = "agent:\(job.agentId):cron-\(runSessionId)"
+            }
+        } else {
+            sessionKey = "agent:\(job.agentId):main"
+        }
         let timestamp = Date(timeIntervalSince1970: run.runAtMs / 1000)
 
         let responseMessage = MessageRecord(
@@ -709,6 +721,11 @@ final class CloudKitRelayService {
         }
 
         NSLog("[CloudKitRelay] processIncomingMessage: id=%@ session=%@", message.id, message.sessionKey)
+        if let sourceInfo = extractSourceInfo(from: message) {
+            NSLog("[CloudKitRelay] Source metadata for %@: platform=%@ clientId=%@ transport=%@", message.id, sourceInfo.platform, sourceInfo.clientId, sourceInfo.transport)
+        } else {
+            NSLog("[CloudKitRelay] Source metadata for %@: unavailable", message.id)
+        }
 
         guard let relayClient else {
             logger.error("Relay client not configured")
@@ -795,6 +812,52 @@ final class CloudKitRelayService {
             if let path = imageLocalPath {
                 messageText = messageText.isEmpty ? path : messageText + "\n" + path
             }
+
+            // Inject source metadata so the agent can tell which device/platform sent the message.
+            if let metaData = message.metadata.data(using: .utf8),
+               let metaJson = try? JSONSerialization.jsonObject(with: metaData) as? [String: Any] {
+                let platform = (metaJson["sourcePlatform"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let clientId = (metaJson["clientId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if platform?.isEmpty == false || clientId?.isEmpty == false {
+                    var conversationInfo: [String: Any] = [:]
+
+                    if let platform, !platform.isEmpty {
+                        conversationInfo["source_platform"] = platform
+                    }
+                    if let clientId, !clientId.isEmpty {
+                        conversationInfo["client_id"] = clientId
+                    }
+
+                    conversationInfo["message_id"] = "webchat:\(message.id)"
+
+                    let formatter = DateFormatter()
+                    formatter.locale = Locale(identifier: "en_US_POSIX")
+                    formatter.timeZone = .current
+                    formatter.dateFormat = "EEE yyyy-MM-dd HH:mm zzz"
+                    conversationInfo["timestamp"] = formatter.string(from: message.timestamp)
+
+                    if let attachments = metaJson["attachments"] as? [[String: Any]],
+                       let firstAttachment = attachments.first,
+                       let transport = firstAttachment["transport"] as? String,
+                       !transport.isEmpty {
+                        conversationInfo["attachment_transport"] = transport
+                    }
+
+                    if let infoData = try? JSONSerialization.data(withJSONObject: conversationInfo, options: [.prettyPrinted, .sortedKeys]),
+                       let infoStr = String(data: infoData, encoding: .utf8) {
+                        let prefix = """
+                        Conversation info (untrusted metadata):
+                        ```json
+                        \(infoStr)
+                        ```
+
+                        """
+                        messageText = prefix + messageText
+                    }
+                }
+            }
+
             let contentPreview = String(messageText.prefix(50))
             NSLog("[CloudKitRelay] Sending to Gateway: session=%@ content=%@", message.sessionKey, contentPreview)
             let response: String
@@ -1135,6 +1198,34 @@ final class CloudKitRelayService {
     private func loadSyncedCronRunIDs() -> Set<String> {
         let raw = UserDefaults.standard.array(forKey: Self.cronRunSyncedIDsKey) as? [String] ?? []
         return Set(raw)
+    }
+
+    private struct SourceInfo {
+        let platform: String
+        let clientId: String
+        let transport: String
+    }
+
+    private func extractSourceInfo(from message: MessageRecord) -> SourceInfo? {
+        guard let data = message.metadata.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let platform = (json["sourcePlatform"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let clientId = (json["clientId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachments = json["attachments"] as? [[String: Any]]
+        let transport = attachments?.compactMap { $0["transport"] as? String }.first?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard platform?.isEmpty == false || clientId?.isEmpty == false || transport?.isEmpty == false else {
+            return nil
+        }
+
+        return SourceInfo(
+            platform: (platform?.isEmpty == false ? platform! : "unknown"),
+            clientId: (clientId?.isEmpty == false ? clientId! : "unknown"),
+            transport: (transport?.isEmpty == false ? transport! : "unknown")
+        )
     }
 
     private func extractClientMessageID(from message: MessageRecord) -> String? {

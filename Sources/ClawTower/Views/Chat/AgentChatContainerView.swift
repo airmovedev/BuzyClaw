@@ -15,7 +15,7 @@ struct AgentChatContainerView: View {
         self.client = client
         self.injectedContext = injectedContext
         self.appState = appState
-        _selectedSessionKey = State(initialValue: "agent:\(agent.id):\(agent.id)")
+        _selectedSessionKey = State(initialValue: "agent:\(agent.id):main")
     }
 
     var body: some View {
@@ -32,7 +32,7 @@ struct AgentChatContainerView: View {
 
                 Spacer()
 
-                if selectedSessionKey != "agent:\(agent.id):\(agent.id)" {
+                if selectedSessionKey != "agent:\(agent.id):main" {
                     Text("当前: \(selectedSessionKey)")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -91,7 +91,7 @@ struct AgentChatContainerView: View {
     private func loadSessions() async {
         sessions = (try? await client.listSessions(agentId: agent.id, limit: 100)) ?? []
         if !sessions.contains(where: { $0.key == selectedSessionKey }) {
-            selectedSessionKey = "agent:\(agent.id):\(agent.id)"
+            selectedSessionKey = "agent:\(agent.id):main"
         }
     }
 }
