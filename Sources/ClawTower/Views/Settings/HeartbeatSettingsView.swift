@@ -96,13 +96,36 @@ struct HeartbeatSettingsView: View {
         }
 
         var heartbeatModelFromConfig: String?
-        if let agentsObj = json["agents"] as? [String: Any],
-           let defaults = agentsObj["defaults"] as? [String: Any] {
-            buildModelOptions(from: defaults)
+        var heartbeatEveryFromConfig: String?
 
-            if let hb = defaults["heartbeat"] as? [String: Any] {
+        if let agentsObj = json["agents"] as? [String: Any] {
+            buildModelOptions(from: agentsObj["defaults"] as? [String: Any])
+
+            // Priority: agent-specific config (agents.list[main]) overrides global default
+            var effectiveHeartbeat: [String: Any]?
+
+            // First check for main agent's specific config
+            if let list = agentsObj["list"] as? [[String: Any]] {
+                for agent in list {
+                    if agent["id"] as? String == "main",
+                       let hb = agent["heartbeat"] as? [String: Any] {
+                        effectiveHeartbeat = hb
+                        break
+                    }
+                }
+            }
+
+            // Fall back to global defaults if no agent-specific config
+            if effectiveHeartbeat == nil {
+                effectiveHeartbeat = (agentsObj["defaults"] as? [String: Any])?["heartbeat"] as? [String: Any]
+            }
+
+            if let hb = effectiveHeartbeat {
                 globalEnabled = true
-                if let every = hb["every"] as? String { defaultInterval = every }
+                if let every = hb["every"] as? String {
+                    defaultInterval = every
+                    heartbeatEveryFromConfig = every
+                }
                 if let model = hb["model"] as? String {
                     defaultModel = model
                     heartbeatModelFromConfig = model
@@ -179,13 +202,48 @@ struct HeartbeatSettingsView: View {
         guard var json = readConfig(),
               var agentsObj = json["agents"] as? [String: Any] else { return }
 
-        var defaults = agentsObj["defaults"] as? [String: Any] ?? [:]
-        if globalEnabled {
-            defaults["heartbeat"] = ["every": defaultInterval, "model": defaultModel]
+        let newHeartbeat: [String: Any]? = globalEnabled
+            ? ["every": defaultInterval, "model": defaultModel]
+            : nil
+
+        // Priority: save to agent-specific config (main agent) if it exists,
+        // otherwise fall back to global defaults
+        if var list = agentsObj["list"] as? [[String: Any]] {
+            var found = false
+            for i in 0..<list.count {
+                if list[i]["id"] as? String == "main" {
+                    if let hb = newHeartbeat {
+                        list[i]["heartbeat"] = hb
+                    } else {
+                        list[i].removeValue(forKey: "heartbeat")
+                    }
+                    found = true
+                    break
+                }
+            }
+            if found {
+                agentsObj["list"] = list
+            } else {
+                // No main agent entry, save to global defaults
+                var defaults = agentsObj["defaults"] as? [String: Any] ?? [:]
+                if let hb = newHeartbeat {
+                    defaults["heartbeat"] = hb
+                } else {
+                    defaults.removeValue(forKey: "heartbeat")
+                }
+                agentsObj["defaults"] = defaults
+            }
         } else {
-            defaults.removeValue(forKey: "heartbeat")
+            // No list, save to global defaults
+            var defaults = agentsObj["defaults"] as? [String: Any] ?? [:]
+            if let hb = newHeartbeat {
+                defaults["heartbeat"] = hb
+            } else {
+                defaults.removeValue(forKey: "heartbeat")
+            }
+            agentsObj["defaults"] = defaults
         }
-        agentsObj["defaults"] = defaults
+
         json["agents"] = agentsObj
 
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]) {
