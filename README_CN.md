@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.1">
-    <img src="https://img.shields.io/badge/下载-v1.0.1-blue?style=flat-square" alt="下载 v1.0.0">
+  <a href="https://github.com/airmovedev/BuzyClaw/releases/latest">
+    <img src="https://img.shields.io/github/v/release/airmovedev/BuzyClaw?style=flat-square&label=下载&color=blue" alt="下载最新版本">
   </a>
   <img src="https://img.shields.io/badge/平台-macOS%2014%2B%20%7C%20iOS%2018%2B-blue?style=flat-square" alt="Platform">
   <img src="https://img.shields.io/badge/swift-6-orange?style=flat-square" alt="Swift 6">
@@ -110,7 +110,7 @@
 
 ### 下载安装
 
-从 [Releases](https://github.com/airmovedev/BuzyClaw/releases/tag/v1.0.1) 页面下载最新的 DMG 文件。
+从 [Releases](https://github.com/airmovedev/BuzyClaw/releases/latest) 页面下载最新的 DMG 文件。
 
 1. 打开 DMG
 2. 将 **BuzyClaw** 拖入应用程序文件夹
