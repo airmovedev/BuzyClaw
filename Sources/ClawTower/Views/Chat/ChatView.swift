@@ -399,23 +399,13 @@ struct ChatView: View {
 
             if fetchedLastId != currentLastId {
                 // Drop local messages that have a corresponding server message.
-                // Match by: same ID, OR same role within 5s AND similar content.
-                // This handles locally-created messages (UUID ids) whose server
-                // counterparts have generated ids (role-timestamp).
+                // Match by: same ID, OR same role + similar content within a time window.
+                // Assistant messages use a large window (streaming can take minutes).
                 let filteredLocal = messages.filter { msg in
                     // Keep if server has the exact same ID (will be deduplicated later)
                     if sorted.contains(where: { $0.id == msg.id }) { return true }
                     // Check for a server message with same role, close timestamp, and matching content
-                    let localTs = msg.timestamp.timeIntervalSince1970
-                    let hasServerEquivalent = sorted.contains { serverMsg in
-                        guard serverMsg.role == msg.role else { return false }
-                        let timeDiff = abs(serverMsg.timestamp.timeIntervalSince1970 - localTs)
-                        guard timeDiff <= 5 else { return false }
-                        // Content match: prefix comparison (server may strip/add formatting)
-                        let localPrefix = String(msg.content.prefix(100))
-                        let serverPrefix = String(serverMsg.content.prefix(100))
-                        return localPrefix == serverPrefix
-                    }
+                    let hasServerEquivalent = hasFuzzyLocalEquivalent(msg, in: sorted)
                     // Drop local copy if server has an equivalent (server version wins)
                     return !hasServerEquivalent
                 }
@@ -510,6 +500,18 @@ struct ChatView: View {
         )
     }
 
+    private var isMainAgentPrimarySession: Bool {
+        sessionKey == "agent:main:main"
+    }
+
+    private func shouldHideSystemInjectedUserMessage(_ message: ChatMessage) -> Bool {
+        guard message.isUser, message.isSystemInjected else { return false }
+        // Keep the main agent chat clean (heartbeat/system orchestration lives here),
+        // but show injected user messages in non-main agent sessions because those are
+        // often real tasks dispatched via sessions_send.
+        return isMainAgentPrimarySession
+    }
+
     private func updateDisplayMessages(reason: String = "unknown") {
         perfUpdateInvocationCount += 1
         let updateStart = CFAbsoluteTimeGetCurrent()
@@ -530,7 +532,8 @@ struct ChatView: View {
                 newCache[message.id] = message.content
                 continue
             }
-            if message.isUser && !message.isSystemInjected {
+            if message.isUser {
+                if shouldHideSystemInjectedUserMessage(message) { continue }
                 filtered.append(message)
                 newCache[message.id] = message.content
                 continue
@@ -539,7 +542,10 @@ struct ChatView: View {
 
             let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed == "HEARTBEAT_OK" { continue }
+            if trimmed == "REPLY_SKIP" { continue }
             if message.role == .assistant && message.content.contains("Stats: runtime") { continue }
+            // Hide sessions_send results injected from other agents
+            if message.isUser && (trimmed.hasPrefix("[sessions_send") || trimmed.hasPrefix("[Tool: sessions_send")) { continue }
 
             let displayContent = displayContentCache[message.id] ?? chatDisplayContent(message)
             if displayContent.isEmpty { continue }
@@ -580,11 +586,28 @@ struct ChatView: View {
         return items.filter { seen.insert($0.id).inserted }
     }
 
+    /// Fuzzy-match a server message against local messages to detect duplicates.
+    /// Assistant messages use a large time window (streaming can take minutes).
+    /// User messages use a moderate window (local creation vs server recording delay).
+    private func hasFuzzyLocalEquivalent(_ serverMsg: ChatMessage, in localMessages: [ChatMessage]) -> Bool {
+        let serverTs = serverMsg.timestamp.timeIntervalSince1970
+        let serverPrefix = String(serverMsg.content.prefix(100))
+        // Assistant responses can stream for minutes; user messages should be close
+        let maxTimeDiff: TimeInterval = serverMsg.role == .assistant ? 300 : 30
+        return localMessages.contains { local in
+            guard local.role == serverMsg.role else { return false }
+            let timeDiff = abs(local.timestamp.timeIntervalSince1970 - serverTs)
+            guard timeDiff <= maxTimeDiff else { return false }
+            let localPrefix = String(local.content.prefix(100))
+            return localPrefix == serverPrefix
+        }
+    }
+
     private func chatDisplayContent(_ message: ChatMessage) -> String {
         if let summary = perfRiskSummary(for: message, displayContent: message.content) {
             perfLogThrottled(key: "display-content-\(message.id)", every: 2.0, "chatDisplayContent \(summary)")
         }
-        if message.isUser && !message.isSystemInjected { return message.content }
+        if message.isUser { return message.content }
         let lines = message.content.components(separatedBy: "\n")
         let filtered = lines.filter { line in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -598,9 +621,13 @@ struct ChatView: View {
 
     private func shouldHideInChat(_ message: ChatMessage) -> Bool {
         if message.isStreaming { return false }
-        if message.isUser && !message.isSystemInjected { return false }
-        if message.isSystemInjected { return true }
         let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "REPLY_SKIP" { return true }
+        if message.isUser && (trimmed.hasPrefix("[sessions_send") || trimmed.hasPrefix("[Tool: sessions_send")) { return true }
+        if message.isUser {
+            return shouldHideSystemInjectedUserMessage(message)
+        }
+        if message.isSystemInjected { return true }
         if trimmed == "HEARTBEAT_OK" { return true }
         if message.role == .assistant && message.content.contains("Stats: runtime") { return true }
         let displayContent = chatDisplayContent(message)
@@ -723,16 +750,7 @@ struct ChatView: View {
                     let existingIds = Set(messages.map(\.id))
                     let newMessages = history.filter { serverMsg in
                         if existingIds.contains(serverMsg.id) { return false }
-                        let serverTs = serverMsg.timestamp.timeIntervalSince1970
-                        let serverPrefix = String(serverMsg.content.prefix(100))
-                        let hasLocalEquivalent = messages.contains { local in
-                            guard local.role == serverMsg.role else { return false }
-                            let timeDiff = abs(local.timestamp.timeIntervalSince1970 - serverTs)
-                            guard timeDiff <= 5 else { return false }
-                            let localPrefix = String(local.content.prefix(100))
-                            return localPrefix == serverPrefix
-                        }
-                        if hasLocalEquivalent { return false }
+                        if hasFuzzyLocalEquivalent(serverMsg, in: messages) { return false }
                         if shouldHideInChat(serverMsg) { return false }
                         return true
                     }
