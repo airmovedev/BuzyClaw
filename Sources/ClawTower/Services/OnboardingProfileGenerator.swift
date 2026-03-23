@@ -329,6 +329,23 @@ struct OnboardingProfileGenerator {
         - 已完成（completed）
         """
 
+        let taskReportingSection = """
+
+        ## 任务回报机制（跨 Agent 协作）
+
+        当你收到来自其他 Agent 通过 `sessions_send` 派遣的任务时，**完成后必须主动回报**：
+
+        1. 完成任务后，使用 `sessions_send` 向派遣方（通常是 `agent:main:main`）发送完成报告
+        2. 报告内容包括：
+           - ✅ 或 ❌ 完成状态
+           - 改了什么（文件/方法/关键改动）
+           - 如果涉及代码：BUILD 结果
+           - 需要用户验证的事项
+        3. 格式简洁，只报结果，不重复任务描述
+
+        这条规则确保独立 Agent 之间的协作有完整的闭环——委派方不需要轮询你的状态，你主动回报即可。
+        """
+
         let principlesSection = """
 
         ## 共事原则
@@ -337,6 +354,7 @@ struct OnboardingProfileGenerator {
         ## 使用场景
         \(scenariosText)
         \(taskManagementSection)
+        \(taskReportingSection)
         """
 
         if var template = loadTemplate("AGENTS.md") {

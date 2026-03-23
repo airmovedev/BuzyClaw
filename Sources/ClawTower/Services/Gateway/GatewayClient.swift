@@ -1127,15 +1127,9 @@ final class GatewayClient: Sendable {
         let identity = identityLines
         try identity.write(toFile: "\(workspaceDir)/IDENTITY.md", atomically: true, encoding: .utf8)
 
-        let agents = """
-        # AGENTS.md - \(draft.name)'s Workspace
-
-        Created by ClawTower.
-        """
-        let agentsPath = "\(workspaceDir)/AGENTS.md"
-        if !fm.fileExists(atPath: agentsPath) {
-            try agents.write(toFile: agentsPath, atomically: true, encoding: .utf8)
-        }
+        // AGENTS.md is generated earlier by OnboardingProfileGenerator/writeAgents().
+        // Do not write a placeholder here; in normal onboarding flow this file already exists,
+        // and leaving dead fallback code here only makes the creation path harder to reason about.
 
         let soul = """
         # SOUL.md - Who You Are
